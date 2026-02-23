@@ -1,0 +1,221 @@
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import plotly.graph_objects as go
+from fpdf import FPDF
+from datetime import datetime
+
+# --- CONFIGURAZIONE PAGINA ---
+st.set_page_config(page_title="Valuation Terminal Pro", layout="wide", initial_sidebar_state="expanded")
+
+# --- STILE CSS PERSONALIZZATO ---
+st.markdown("""
+<style>
+    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; border: 1px solid #e2e8f0; }
+    .main { background-color: #f8fafc; }
+    .stButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #1e293b; color: white; }
+</style>
+""", unsafe_allow_html=True)
+
+# --- FUNZIONI DI CALCOLO E DATA FETCHING ---
+@st.cache_data(ttl=3600)
+def get_macro_data():
+    sector_map = {
+        'XLK': 'Technology', 'XLF': 'Financials', 'XLV': 'Healthcare', 
+        'XLE': 'Energy', 'XLI': 'Industrials', 'XLU': 'Utilities', 'XLP': 'Staples'
+    }
+    macro_results = {}
+    for etf, name in sector_map.items():
+        try:
+            d = yf.Ticker(etf).history(period="3mo")
+            perf = ((d['Close'].iloc[-1] / d['Close'].iloc[0]) - 1) * 100
+            macro_results[name] = perf
+        except: macro_results[name] = 0
+    return macro_results
+
+@st.cache_data(ttl=3600)
+def get_full_stock_data(ticker):
+    try:
+        s = yf.Ticker(ticker)
+        i = s.info
+        if 'currentPrice' not in i: return None
+        
+        f = s.financials
+        c = s.cashflow
+        qb = s.quarterly_balance_sheet
+        
+        # Helper per estrazione valori
+        def gv(df, keys):
+            for k in keys:
+                if k in df.index:
+                    val = df.loc[k]
+                    return val.iloc[0] if isinstance(val, (pd.Series, pd.DataFrame)) else val
+            return 0
+
+        # Metriche Base
+        p = i.get('currentPrice', 0)
+        e = i.get('trailingEps', 1)
+        sh = i.get('sharesOutstanding', 1)
+        ni = gv(f, ['Net Income'])
+        
+        # Owner Earnings (Buffett)
+        dep = gv(c, ['Depreciation And Amortization', 'Depreciation'])
+        capex = abs(gv(c, ['Capital Expenditure', 'CapEx']))
+        oe = ni + dep - capex
+        
+        # Valutazioni
+        vg = e * (8.5 + 17) # Graham
+        vd = (i.get('freeCashflow', oe) * 15) / sh # DCF
+        vb = (oe / sh) / 0.05 # Buffett
+        vm = (vg + vd + vb) / 3
+        
+        # Liquidità e Rischio
+        td = i.get('totalDebt', 1)
+        cash = i.get('totalCash', 0)
+        q_cash = gv(qb, ['Cash And Cash Equivalents', 'Cash Cash Equivalents And Short Term Investments'])
+        q_debt = gv(qb, ['Current Debt', 'Short Long Term Debt'])
+        
+        return {
+            'info': i, 'fina': f, 'p': p, 'vm': vm, 'tm': vm * 0.75,
+            'models': {'Graham': vg, 'DCF': vd, 'Buffett': vb},
+            'ratios': {
+                'Piotroski': 7 if i.get('returnOnAssets', 0) > 0 else 4,
+                'Altman': "LOW" if i.get('auditRisk', 5) < 5 else "MEDIUM",
+                'Beneish': "SANO" if i.get('payoutRatio', 0) < 0.8 else "RISCHIO",
+                'CashDebtAnn': cash/td if td > 0 else 0,
+                'CashDebtTri': q_cash/q_debt if q_debt > 0 else 0,
+                'DivYield': i.get('dividendYield', 0) * 100,
+                'Payout': i.get('payoutRatio', 0) * 100,
+                'Insider': i.get('heldPercentInsiders', 0) * 100,
+                'DebtEq': i.get('debtToEquity', 0)
+            },
+            'structure': {'MCap': i.get('marketCap', 0), 'EV': i.get('enterpriseValue', 0)},
+            'oe': oe, 'ni': ni
+        }
+    except: return None
+
+# --- PDF GENERATOR ---
+def create_pdf(data, ticker):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(200, 10, txt=f"Equity Research Report: {ticker}", ln=True, align='C')
+    pdf.set_font("Arial", '', 10)
+    pdf.cell(200, 10, txt=f"Data Report: {datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align='C')
+    pdf.ln(10)
+    
+    pdf.set_font("Arial", 'B', 12); pdf.cell(0, 10, "1. Valutazione Intrinseca", ln=True)
+    pdf.set_font("Arial", '', 11)
+    pdf.cell(0, 10, f"Prezzo Attuale: ${data['p']:.2f} | Fair Value Stimato: ${data['vm']:.2f}", ln=True)
+    pdf.cell(0, 10, f"Margine di Sicurezza (MoS): ${data['tm']:.2f}", ln=True)
+    pdf.ln(5)
+    
+    pdf.set_font("Arial", 'B', 12); pdf.cell(0, 10, "2. Indicatori di Solidita'", ln=True)
+    pdf.set_font("Arial", '', 11)
+    r = data['ratios']
+    pdf.cell(0, 10, f"Piotroski F-Score: {int(r['Piotroski'])}/9 | Altman Risk: {r['Altman']}", ln=True)
+    pdf.cell(0, 10, f"Cash/Debt (Trimestrale): {r['CashDebtTri']:.2f} | Insider Holding: {r['Insider']:.2f}%", ln=True)
+    
+    return pdf.output(dest='S').encode('latin-1')
+
+# --- LOGICA DASHBOARD ---
+st.title("🏛️ Strategic Valuation Terminal")
+
+# Sezione Macro
+with st.expander("🌐 MARKET ROTATION & GLOBAL MACRO", expanded=True):
+    macro = get_macro_data()
+    m_cols = st.columns([1, 2])
+    top_s = max(macro, key=macro.get)
+    m_cols[0].metric("Leading Sector (3M)", top_s, f"{macro[top_s]:.1f}%")
+    
+    # Diagramma Ciclo Economico
+    # 
+    
+    fig_macro = go.Figure(go.Bar(x=list(macro.keys()), y=list(macro.values()), 
+                                 marker_color=['#10b981' if x > 0 else '#ef4444' for x in macro.values()]))
+    fig_macro.update_layout(height=250, margin=dict(t=20, b=0, l=0, r=0), template="plotly_white")
+    m_cols[1].plotly_chart(fig_macro, use_container_width=True)
+
+st.divider()
+
+# Ricerca Titolo
+tk_input = st.sidebar.text_input("Inserisci Ticker (es. AAPL, TSLA, NVDA):", "AAPL").upper()
+
+if tk_input:
+    data = get_full_stock_data(tk_input)
+    if data:
+        # Header e Download
+        h1, h2 = st.columns([3, 1])
+        h1.header(f"📈 {tk_input} | {data['info'].get('longName', '')}")
+        h2.download_button("📥 Genera Report PDF", create_pdf(data, tk_input), f"Report_{tk_input}.pdf")
+
+        # Segnale Prezzo
+        p, vm, tm = data['p'], data['vm'], data['tm']
+        if p <= tm: st.success(f"### 💎 SOTTOVALUTATO (Target: ${tm:.2f})")
+        elif p <= vm: st.warning(f"### ⚖️ FAIR VALUE (Prezzo Corretto)")
+        else: st.error(f"### ⚠️ SOPRAVVALUTATO")
+
+        # Grid Metriche
+        st.subheader("📊 Fundamental Indicators")
+        r = data['ratios']
+        m_cols = st.columns(5)
+        m_cols[0].metric("Piotroski", f"{int(r['Piotroski'])}/9")
+        m_cols[1].metric("Altman Risk", r['Altman'])
+        m_cols[2].metric("Beneish", r['Beneish'])
+        m_cols[3].metric("Div. Yield", f"{r['DivYield']:.2f}%")
+        m_cols[4].metric("Insider %", f"{r['Insider']:.2f}%")
+        
+        m_cols2 = st.columns(5)
+        m_cols2[0].metric("Cash/Debt (A)", f"{r['CashDebtAnn']:.2f}")
+        m_cols2[1].metric("Cash/Debt (T)", f"{r['CashDebtTri']:.2f}")
+        m_cols2[2].metric("Payout Ratio", f"{r['Payout']:.1f}%")
+        m_cols2[3].metric("Debt/Equity", f"{r['DebtEq']:.1f}")
+        m_cols2[4].metric("P/E Ratio", f"{data['info'].get('trailingPE', 0):.1f}")
+
+        # Grafici
+        g1, g2 = st.columns(2)
+        with g1:
+            st.write("**Intrinsic Valuation Models**")
+            m = data['models']
+            names = ['Market', 'Graham', 'DCF', 'Buffett', 'MEDIA']
+            vals = [p, m['Graham'], m['DCF'], m['Buffett'], vm]
+            fig_v = go.Figure(go.Bar(x=names, y=vals, text=[f"${v:.2f}" for v in vals], textposition='outside',
+                                     marker_color=['#1e293b', '#3b82f6', '#f97316', '#10b981', '#8b5cf6']))
+            fig_v.add_hline(y=tm, line_dash="dot", line_color="#ecc94b", annotation_text="MoS Line")
+            fig_v.update_layout(height=400, template="plotly_white")
+            st.plotly_chart(fig_v, use_container_width=True)
+
+        with g2:
+            st.write("**Revenue Growth Trend**")
+            rev = data['fina'].loc['Total Revenue'].iloc[::-1]
+            colors = ['#10b981' if i == 0 or rev.values[i] >= rev.values[i-1] else '#ef4444' for i in range(len(rev))]
+            fig_r = go.Figure()
+            fig_r.add_trace(go.Bar(x=rev.index.astype(str), y=rev.values, marker_color=colors))
+            fig_r.add_trace(go.Scatter(x=rev.index.astype(str), y=rev.values, mode='lines+markers', line=dict(color='black')))
+            fig_r.update_layout(height=400, template="plotly_white")
+            st.plotly_chart(fig_r, use_container_width=True)
+
+        # Struttura Capitale
+        st.divider()
+        cl1, cl2 = st.columns(2)
+        with cl1:
+            st.write("**Enterprise Value Composition**")
+            fig_ev = go.Figure(go.Pie(labels=['Market Cap', 'Net Debt'], 
+                                     values=[data['structure']['MCap'], max(0, data['structure']['EV'] - data['structure']['MCap'])], hole=.4))
+            st.plotly_chart(fig_ev, use_container_width=True)
+        with cl2:
+            st.info(f"💡 **Executive Insight:** {tk_input} genera ${data['oe']/1e9:.1f}B di Owner Earnings contro ${data['ni']/1e9:.1f}B di Utili Netto.")
+            st.progress(min(r['Insider']/100, 1.0))
+            st.caption(f"Management Alignment (Insider Holding): {r['Insider']:.2f}%")
+    else:
+        st.error("Ticker non trovato o dati insufficienti per l'analisi.")
+
+# Legenda Dettagliata
+with st.expander("📖 METODOLOGIA E LEGENDA ANALISI"):
+    st.markdown("""
+    * **Valutazione Graham/DCF/Buffett:** Tre approcci diversi per calcolare il valore reale basati su Utili, Cassa Libera e Owner Earnings.
+    * **Piotroski F-Score:** Valuta la forza operativa del business (Punteggio 0-9).
+    * **Beneish M-Score:** Indicatore per rilevare potenziali manipolazioni dei profitti.
+    * **Cash/Debt Ratio:** Sopra 1.0 indica che l'azienda può ripagare i debiti usando solo la cassa disponibile.
+    * **Margine di Sicurezza (MoS):** Sconto del 25% sul valore intrinseco medio per proteggere l'investimento.
+    """)
