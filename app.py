@@ -35,19 +35,20 @@ def fetch_stock_data(ticker):
         i = s.info
         f = s.financials
         c = s.cashflow
+        b = s.balance_sheet
         qb = s.quarterly_balance_sheet
         
         if 'currentPrice' not in i:
             return None
 
         def gv(df, keys):
+            if df is None or df.empty: return 0
             for k in keys:
                 if k in df.index:
                     val = df.loc[k]
                     return val.iloc[0] if isinstance(val, (pd.Series, pd.DataFrame)) else val
             return 0
 
-        # Metriche Prezzo e Utili
         p = i.get('currentPrice', 0)
         e = i.get('trailingEps', 1)
         sh = i.get('sharesOutstanding', 1)
@@ -58,22 +59,23 @@ def fetch_stock_data(ticker):
         capex = abs(gv(c, ['Capital Expenditure']))
         oe = ni + dep - capex
         
-        # Valutazioni Intrinseche
+        # Valutazioni
         vg = e * (8.5 + 17)
         vd = (i.get('freeCashflow', oe) * 15) / sh
         vb = (oe / sh) / 0.05
         vm = (vg + vd + vb) / 3
         tm = vm * 0.75
 
-        # --- LOGICA CASSA/DEBITO (PRECISIONE APPLE 0.74/0.49) ---
-        total_debt_ann = i.get('totalDebt', 1)
-        cash_ann = i.get('totalCash', 0) 
-        ratio_ann = cash_ann / total_debt_ann if total_debt_ann > 0 else 0
+        # --- LOGICA CASH/DEBT DEFINITIVA ---
+        # Annuale (Target AAPL: ~0.49)
+        ann_cash = gv(b, ['Cash And Cash Equivalents']) + gv(b, ['Other Short Term Investments', 'Short Term Investments'])
+        ann_debt = gv(b, ['Total Debt'])
+        ratio_ann = ann_cash / ann_debt if ann_debt > 0 else 0
 
-        # Calcolo Trimestrale inclusi Investimenti Breve Termine
-        q_liquidity = gv(qb, ['Cash And Cash Equivalents']) + gv(qb, ['Other Short Term Investments', 'Short Term Investments'])
-        q_total_debt = gv(qb, ['Total Debt'])
-        ratio_tri = q_liquidity / q_total_debt if q_total_debt > 0 else 0
+        # Trimestrale (Target AAPL: ~0.74)
+        q_cash = gv(qb, ['Cash And Cash Equivalents']) + gv(qb, ['Other Short Term Investments', 'Short Term Investments'])
+        q_debt = gv(qb, ['Total Debt'])
+        ratio_tri = q_cash / q_debt if q_debt > 0 else 0
 
         return {
             'ticker': ticker, 'p': p, 'vm': vm, 'tm': tm, 
@@ -86,10 +88,9 @@ def fetch_stock_data(ticker):
                 'CashDebtAnn': ratio_ann, 'CashDebtTri': ratio_tri,
                 'DivYield': i.get('dividendYield', 0) * 100,
                 'Payout': i.get('payoutRatio', 0) * 100,
-                'Insider': i.get('heldPercentInsiders', 0) * 100,
-                'DebtEq': i.get('debtToEquity', 0)
+                'Insider': i.get('heldPercentInsiders', 0) * 100
             },
-            'info': i, 'fina': f, 'oe': oe, 'ni': ni, 'sector': i.get('sector', 'N/A')
+            'info': i, 'fina': f, 'sector': i.get('sector', 'N/A')
         }
     except:
         return None
@@ -116,8 +117,6 @@ with col_m2:
     ))
     fig_macro.update_layout(height=250, margin=dict(t=20, b=0, l=0, r=0), template="plotly_white")
     st.plotly_chart(fig_macro, use_container_width=True)
-
-
 
 st.divider()
 
@@ -177,7 +176,7 @@ if tk_list:
             st.plotly_chart(fig_v, use_container_width=True)
 
         with g2:
-            st.write("**Revenue Trend & Momentum**")
+            st.write("**Revenue Trend**")
             if 'Total Revenue' in data['fina'].index:
                 rev = data['fina'].loc['Total Revenue'].iloc[::-1]
                 colors = ['#10b981' if i == 0 or rev.values[i] >= rev.values[i-1] else '#ef4444' for i in range(len(rev))]
@@ -186,14 +185,4 @@ if tk_list:
                 fig_r.add_trace(go.Scatter(x=rev.index.astype(str), y=rev.values, mode='lines+markers', line=dict(color='black')))
                 st.plotly_chart(fig_r, use_container_width=True)
 
-        # LEGENDA
-        with st.expander("📖 LEGENDA E ANALISI"):
-            st.write(f"**Settore:** {data['sector']}")
-            st.markdown(f"""
-            - **Cash/Debt (Tri):** Valore attuale **{r['CashDebtTri']:.2f}**. (Liquidità totale su debito totale).
-            - **Cash/Debt (Ann):** Valore storico **{r['CashDebtAnn']:.2f}**.
-            - **Beneish M-Score:** Analisi manipolazione contabile.
-            """)
-else:
-    st.error("Dati non disponibili. Controlla la connessione o i ticker.")
 
