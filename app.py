@@ -24,7 +24,8 @@ def get_macro_rotation():
             d = yf.Ticker(etf).history(period="3mo")
             perf = ((d['Close'].iloc[-1] / d['Close'].iloc[0]) - 1) * 100
             macro_results[name] = perf
-        except: macro_results[name] = 0
+        except:
+            macro_results[name] = 0
     return macro_results
 
 @st.cache_data(ttl=3600)
@@ -36,7 +37,8 @@ def fetch_stock_data(ticker):
         c = s.cashflow
         qb = s.quarterly_balance_sheet
         
-        if 'currentPrice' not in i: return None
+        if 'currentPrice' not in i:
+            return None
 
         def gv(df, keys):
             for k in keys:
@@ -89,25 +91,29 @@ def fetch_stock_data(ticker):
             },
             'info': i, 'fina': f, 'oe': oe, 'ni': ni, 'sector': i.get('sector', 'N/A')
         }
-    except: return None
+    except:
+        return None
 
 # --- UI MAIN ---
 st.title("🏛️ Strategic Investment Terminal")
 
 # 1. ANALISI MACRO
 st.subheader("🌐 Market Context & Sector Rotation")
-macro = get_macro_rotation()
+macro_data = get_macro_rotation()
 col_m1, col_m2 = st.columns([1, 2])
 
 with col_m1:
-    top_sector = max(macro, key=macro.get)
-    st.metric("Leading Sector (3M)", top_sector, f"{macro[top_sector]:.1f}%")
-    ciclo = "LATE CYCLE / RECESSION" if top_sector in ['Healthcare', 'Utilities', 'Staples'] else "EARLY / MID CYCLE"
-    st.write(f"Estimated Phase: **{ciclo}**")
+    top_sector = max(macro_data, key=macro_data.get)
+    st.metric("Leading Sector (3M)", top_sector, f"{macro_data[top_sector]:.1f}%")
+    ciclo_text = "LATE CYCLE / RECESSION" if top_sector in ['Healthcare', 'Utilities', 'Staples'] else "EARLY / MID CYCLE"
+    st.write(f"Estimated Phase: **{ciclo_text}**")
 
 with col_m2:
-    fig_macro = go.Figure(go.Bar(x=list(macro.keys()), y=list(macro.values()), 
-                                 marker_color=['#10b981' if x > 0 else '#ef4444' for x in macro.values()]))
+    fig_macro = go.Figure(go.Bar(
+        x=list(macro_data.keys()), 
+        y=list(macro_data.values()), 
+        marker_color=['#10b981' if x > 0 else '#ef4444' for x in macro_data.values()]
+    ))
     fig_macro.update_layout(height=250, margin=dict(t=20, b=0, l=0, r=0), template="plotly_white")
     st.plotly_chart(fig_macro, use_container_width=True)
 
@@ -117,15 +123,77 @@ st.divider()
 
 # 2. SCANNER SOTTOVALUTATI
 st.subheader("🎯 Scanner: Migliori Opportunità (MoS > 25%)")
-all_data = [fetch_stock_data(t) for t in DEFAULT_TICKERS]
-valid_data = [r for r in all_data if r is not None]
+with st.spinner("Scansione titoli in corso..."):
+    all_data = [fetch_stock_data(t) for t in DEFAULT_TICKERS]
+    valid_data = [r for r in all_data if r is not None]
     
-under_df = pd.DataFrame([
-    {'Ticker': r['ticker'], 'Prezzo': f"${r['p']:.2f}", 'Fair Value': f"${r['vm']:.2f}", 'Sconto': f"{((r['vm']-r['p'])/r['vm'])*100:.1f}%"}
-    for r in valid_data if r['status'] == "Sottovalutato"
-])
-if not under_df.empty:
-    st.table(under_df)
+    under_list = [
+        {'Ticker': r['ticker'], 'Prezzo': f"${r['p']:.2f}", 'Fair Value': f"${r['vm']:.2f}", 'Sconto': f"{((r['vm']-r['p'])/r['vm'])*100:.1f}%"}
+        for r in valid_data if r['status'] == "Sottovalutato"
+    ]
+    
+    if len(under_list) > 0:
+        st.table(pd.DataFrame(under_list))
+    else:
+        st.info("Nessun titolo sottovalutato rilevato nella lista monitorata.")
+
+st.divider()
+
+# 3. DETTAGLIO TITOLO
+st.sidebar.title("🏢 Asset Selection")
+tk_list = [r['ticker'] for r in valid_data]
+if tk_list:
+    tk_sel = st.sidebar.selectbox("Seleziona Titolo:", tk_list)
+    data = next(r for r in valid_data if r['ticker'] == tk_sel)
+
+    if data:
+        st.header(f"📊 {tk_sel} | {data['info'].get('longName', '')}")
+        
+        if data['status'] == "Sottovalutato":
+            st.success(f"### 💎 SOTTOVALUTATO (Target MoS: ${data['tm']:.2f})")
+        elif data['status'] == "Equo":
+            st.warning("### ⚖️ FAIR VALUE")
+        else:
+            st.error("### ⚠️ SOPRAVVALUTATO")
+
+        # GRID INDICATORI
+        r = data['ratios']
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Piotroski", f"{int(r['Piotroski'])}/9")
+        c2.metric("Altman Risk", r['Altman'])
+        c3.metric("Beneish", r['Beneish'])
+        c4.metric("Cash/Debt (Ann)", f"{r['CashDebtAnn']:.2f}")
+        c5.metric("Cash/Debt (Tri)", f"{r['CashDebtTri']:.2f}")
+
+        # GRAFICI
+        g1, g2 = st.columns(2)
+        with g1:
+            st.write("**Intrinsic Models Comparison**")
+            m_names = ['Market', 'Graham', 'DCF', 'Buffett', 'MEDIA']
+            m_vals = [data['p'], data['models']['Graham'], data['models']['DCF'], data['models']['Buffett'], data['vm']]
+            fig_v = go.Figure(go.Bar(x=m_names, y=m_vals, text=[f"${v:.2f}" for v in m_vals], textposition='outside', 
+                                     marker_color=['#1e293b', '#3b82f6', '#f97316', '#10b981', '#8b5cf6']))
+            fig_v.add_hline(y=data['tm'], line_dash="dot", line_color="#ecc94b", annotation_text="MoS")
+            st.plotly_chart(fig_v, use_container_width=True)
+
+        with g2:
+            st.write("**Revenue Trend & Momentum**")
+            if 'Total Revenue' in data['fina'].index:
+                rev = data['fina'].loc['Total Revenue'].iloc[::-1]
+                colors = ['#10b981' if i == 0 or rev.values[i] >= rev.values[i-1] else '#ef4444' for i in range(len(rev))]
+                fig_r = go.Figure()
+                fig_r.add_trace(go.Bar(x=rev.index.astype(str), y=rev.values, marker_color=colors))
+                fig_r.add_trace(go.Scatter(x=rev.index.astype(str), y=rev.values, mode='lines+markers', line=dict(color='black')))
+                st.plotly_chart(fig_r, use_container_width=True)
+
+        # LEGENDA
+        with st.expander("📖 LEGENDA E ANALISI"):
+            st.write(f"**Settore:** {data['sector']}")
+            st.markdown(f"""
+            - **Cash/Debt (Tri):** Valore attuale **{r['CashDebtTri']:.2f}**. (Liquidità totale su debito totale).
+            - **Cash/Debt (Ann):** Valore storico **{r['CashDebtAnn']:.2f}**.
+            - **Beneish M-Score:** Analisi manipolazione contabile.
+            """)
 else:
-    st.info("Ness
+    st.error("Dati non disponibili. Controlla la connessione o i ticker.")
 
