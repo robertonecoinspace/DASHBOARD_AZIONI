@@ -130,6 +130,55 @@ st.divider()
 
 # 3. ANALISI DETTAGLIATA
 tk_sel = st.sidebar.selectbox("Asset Search:", [r['ticker'] for r in valid_res])
-data = next(r for r in valid_res if r['ticker']
+data = next(r for r in valid_res if r['ticker'] == tk_sel)
+
+if data:
+    h1, h2 = st.columns([3, 1])
+    h1.header(f"📈 {tk_sel} | {data['info'].get('longName', '')}")
+    h2.download_button("📥 Export PDF", create_pdf(data), f"{tk_sel}_Report.pdf")
+
+    # STATUS
+    if data['status'] == "Sottovalutato": st.success(f"💎 SOTTOVALUTATO (Target MoS: ${data['tm']:.2f})")
+    elif data['status'] == "Equo": st.warning("⚖️ FAIR VALUE")
+    else: st.error("⚠️ SOPRAVVALUTATO")
+
+    # INDICATORI PERCENTUALI
+    r = data['ratios']
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Piotroski", f"{int(r['Piotroski'])}/9")
+    c2.metric("Altman", r['Altman'])
+    c3.metric("Beneish", r['Beneish'])
+    c4.metric("Cash/Debt (Ann)", f"{r['CashDebtAnn']:.2f}")
+    c5.metric("Cash/Debt (Tri)", f"{r['CashDebtTri']:.2f}")
+
+    # GRAFICI
+    g1, g2 = st.columns(2)
+    with g1:
+        st.write("**Intrinsic Evaluation (Linea Dorata = MoS)**")
+        vals = [data['p'], data['models']['Graham'], data['models']['DCF'], data['models']['Buffett'], data['vm']]
+        fig_v = go.Figure(go.Bar(x=['Market','Graham','DCF','Buffett','MEDIA'], y=vals, textposition='outside', marker_color='#3b82f6'))
+        fig_v.add_hline(y=data['tm'], line_dash="dot", line_color="#FFD700", line_width=3, annotation_text="Golden MoS Line")
+        st.plotly_chart(fig_v, use_container_width=True)
+
+    with g2:
+        st.write("**Revenue Growth Trend**")
+        rev = data['fina'].loc['Total Revenue'].iloc[::-1]
+        fig_r = go.Figure()
+        fig_r.add_trace(go.Bar(x=rev.index.astype(str), y=rev.values, marker_color='#10b981'))
+        fig_r.add_trace(go.Scatter(x=rev.index.astype(str), y=rev.values, mode='lines+markers', line=dict(color='black')))
+        st.plotly_chart(fig_r, use_container_width=True)
+
+    # EXECUTIVE INSIGHTS
+    st.info(f"💡 **Executive Insight:** {tk_sel} genera ${data['oe']/1e9:.1f}B di Owner Earnings contro ${data['ni']/1e9:.1f}B di Utile Netto. Insider Holding: {r['Insider']:.2f}%")
+
+    # LEGENDA
+    with st.expander("📖 LEGENDA E ANALISI MACRO"):
+        st.write(f"**Settore:** {data['sector']}")
+        st.markdown("""
+        - **Cash/Debt:** Rapporto tra liquidità totale (inclusi investimenti brevi) e debito totale.
+        - **MoS (Linea Dorata):** Margine di sicurezza del 25% rispetto alla media dei modelli.
+        - **Beneish:** SANO (< -1.78), RISCHIO (> -1.78) di manipolazione contabile.
+        """)
+
 
 
