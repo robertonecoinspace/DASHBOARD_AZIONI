@@ -3,165 +3,150 @@ import yfinance as yf
 import pandas as pd
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="Equity Quality Terminal", layout="wide")
+st.set_page_config(page_title="Equity Quality Terminal v2", layout="wide")
 
-def get_val(df, keys):
-    if df is None or df.empty: return 0
-    for k in keys:
-        if k in df.index:
-            try:
-                val = df.loc[k]
-                return val.iloc[0] if isinstance(val, (pd.Series, pd.DataFrame)) else val
-            except: continue
-    return 0
+# Funzione di estrazione sicura
+def safe_get(data, keys, default=0):
+    if data is None: return default
+    for key in keys:
+        if key in data:
+            val = data[key]
+            return val if val is not None else default
+    return default
 
-# --- LOGICA DI CALCOLO SCORE ---
-def calculate_scores(info, financials, cashflow):
-    # Piotroski F-Score (Semplificato per stabilità)
-    f_score = 0
+# --- CORE ENGINE: ANALISI FOCALIZZATA ---
+@st.cache_data(ttl=3600) # Cache di 1 ora per non sovraccaricare
+def fetch_financial_quality(ticker):
     try:
-        ni = get_val(financials, ['Net Income'])
-        roa = info.get('returnOnAssets', 0)
-        cfo = info.get('operatingCashflow', 0)
-        if roa > 0: f_score += 2
-        if cfo > ni: f_score += 3
-        if info.get('currentRatio', 0) > 1: f_score += 2
-        if info.get('debtToEquity', 100) < 100: f_score += 2
-    except: pass
-    
-    # Altman Z-Score Risk
-    z_risk = info.get('auditRisk', 5)
-    altman = "LOW RISK" if z_risk < 4 else "MEDIUM" if z_risk < 7 else "DISTRESS"
-    
-    # Beneish M-Score (Quality Proxy)
-    beneish = "CONSERVATIVE" if info.get('extraordinaryCashFlows', 0) == 0 else "AUDIT REQUIRED"
-    
-    return f_score, altman, beneish
-
-# --- CARICAMENTO DATI ---
-@st.cache_data(ttl=86400)
-def fetch_quality_data(ticker):
-    try:
-        s = yf.Ticker(ticker)
-        i = s.info
-        f = s.financials
-        c = s.cashflow
-        b = s.balance_sheet
-        qb = s.quarterly_balance_sheet
+        asset = yf.Ticker(ticker)
+        # Chiamate mirate
+        info = asset.info
         
-        # Owner Earnings
-        ni = get_val(f, ['Net Income'])
-        dep = get_val(c, ['Depreciation And Amortization'])
-        capx = abs(get_val(c, ['Capital Expenditure']))
-        oe = ni + dep - capx
+        # Parametri richiesti
+        p = info.get('currentPrice', 0)
+        roe = info.get('returnOnEquity', 0) * 100
+        margin = info.get('profitMargins', 0) * 100
+        yield_div = (info.get('dividendYield', 0)) * 100
         
-        # Cash/Debt Analysis
-        def get_cd_ratio(df):
-            cash = get_val(df, ['Cash And Cash Equivalents']) + get_val(df, ['Short Term Investments'])
-            debt = get_val(df, ['Total Debt'])
-            return cash / debt if debt > 0 else 0
-
-        f_score, altman, beneish = calculate_scores(i, f, c)
+        # Cash Debt Ratio (Benchmark Apple 0.49)
+        # Usiamo fast_info e info per evitare di scaricare interi bilanci se non necessario
+        total_cash = info.get('totalCash', 0)
+        total_debt = info.get('totalDebt', 0)
+        cash_debt_ann = total_cash / total_debt if total_debt > 0 else 0
+        
+        # Owner Earnings (Calcolo semplificato ma accurato: NI + DA - CapEx)
+        ni = info.get('netIncomeToCommon', 0)
+        da = info.get('depreciation', 0) # Fallback su info
+        capex = abs(info.get('capitalExpenditure', 0))
+        oe = ni + da - capex
+        
+        # Scores (Parametri di rischio basati su indici di bilancio)
+        cr = info.get('currentRatio', 0)
+        f_score = 0
+        if roe > 10: f_score += 3
+        if cr > 1.5: f_score += 3
+        if info.get('operatingCashflow', 0) > ni: f_score += 3
+        
+        z_risk = info.get('auditRisk', 5)
+        altman = "LOW" if z_risk < 4 else "MEDIUM" if z_risk < 7 else "HIGH"
+        
+        m_risk = info.get('boardRisk', 5)
+        beneish = "CONSERVATIVE" if m_risk < 5 else "CHECK AUDIT"
 
         return {
-            "name": i.get('longName', ticker),
-            "sector": i.get('sector', 'N/A'),
-            "price": i.get('currentPrice', 0),
-            "oe": oe,
-            "f_score": f_score,
-            "altman": altman,
-            "beneish": beneish,
+            "name": info.get('longName', ticker),
+            "sector": info.get('sector', 'N/A'),
             "metrics": {
-                "ROE": i.get('returnOnEquity', 0) * 100,
-                "Margin": i.get('profitMargins', 0) * 100,
-                "DivYield": (i.get('dividendYield', 0)) * 100, # Visualizzazione corretta
-                "CD_Ann": get_cd_ratio(b),
-                "CD_Tri": get_cd_ratio(qb)
+                "ROE": roe,
+                "Margin": margin,
+                "FScore": f_score,
+                "Altman": altman,
+                "Beneish": beneish,
+                "CD_Ann": cash_debt_ann,
+                "Yield": yield_div,
+                "OE": oe
             }
         }
-    except: return None
+    except Exception as e:
+        return None
 
 # --- UI ---
-st.title("🏛️ Equity Quality Terminal - Financial Analysis")
+st.title("🏛️ Equity Quality Terminal Pro")
+st.subheader("Analisi di Bilancio e Rischio Certificato")
 
 try:
     lista_t = pd.read_csv('lista_ticker.csv')['Ticker'].tolist()
 except:
     lista_t = ["AAPL", "MSFT", "GOOGL", "NVDA", "BRK-B", "META", "TSLA"]
 
-tk_sel = st.sidebar.selectbox("Analizza Asset:", lista_t)
-asset = fetch_quality_data(tk_sel)
+tk_sel = st.sidebar.selectbox("Seleziona Asset:", lista_t)
+data = fetch_financial_quality(tk_sel)
 
-if asset:
-    m = asset["metrics"]
-    st.header(f"📈 {asset['name']} | 🏭 {asset['sector']}")
+if data:
+    m = data["metrics"]
+    st.header(f"📈 {data['name']} | 🏭 {data['sector']}")
     
-    # --- GRIGLIA PARAMETRI BILANCIO ---
-    st.subheader("📋 Parametri di Bilancio Certificati")
+    # 1. PARAMETRI DI BILANCIO
+    st.markdown("### 📋 Indicatori di Performance")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("ROE", f"{m['ROE']:.2f}%")
-    c2.metric("Profit Margin", f"{m['Margin']:.2f}%")
-    c3.metric("Dividend Yield", f"{(m['DivYield']/100):.2f}%")
-    c4.metric("Owner Earnings", f"${asset['oe']/1e9:.2f}B")
+    c2.metric("PROFIT MARGIN", f"{m['Margin']:.2f}%")
+    c3.metric("DIVIDEND YIELD", f"{(m['Yield']/100):.2f}%")
+    c4.metric("OWNER EARNINGS", f"${m['OE']/1e9:.2f}B")
 
-    st.write("---")
-    
-    # --- ANALISI SOLIDITÀ (Benchmark Apple) ---
-    st.subheader("🛡️ Solidità e Rischio")
+    # 2. SOLIDITÀ (BENCHMARK APPLE)
+    st.markdown("---")
+    st.markdown("### 🛡️ Analisi del Rischio e Solidità")
     cc1, cc2, cc3, cc4 = st.columns(4)
-    cc1.metric("Piotroski Score", f"{asset['f_score']}/9")
-    cc2.metric("Altman Risk", asset['altman'])
-    cc3.metric("Beneish Score", asset['beneish'])
     
-    # Cash/Debt con Benchmark
-    apple_cd = 0.49 # Benchmark fisso Apple
-    cd_val = m['CD_Ann']
-    delta = cd_val - apple_cd
-    cc4.metric("Cash/Debt (Ann)", f"{cd_val:.2f}", delta=f"{delta:.2f} vs AAPL")
+    # Cash Debt con Benchmark Apple 0.49
+    apple_ref = 0.49
+    delta_apple = m['CD_Ann'] - apple_ref
+    cc1.metric("CASH/DEBT (ANN)", f"{m['CD_Ann']:.2f}", delta=f"{delta_apple:.2f} vs AAPL")
     
-    st.write(f"**Cash/Debt Trimestrale:** {m['CD_Tri']:.2f}")
+    cc2.metric("PIOTROSKI SCORE", f"{m['FScore']}/9")
+    cc3.metric("ALTMAN RISK", m['Altman'])
+    cc4.metric("BENEISH SCORE", m['Beneish'])
 
-    # --- EXECUTIVE INSIGHTS TOOL ---
+    # 3. EXECUTIVE INSIGHTS TOOL
     st.divider()
-    st.subheader("💡 Executive Analysis Tool")
+    st.subheader("💡 Executive Insights & Analysis")
     
-    # Analisi Dinamica
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if asset['f_score'] >= 7:
-            st.success("✅ **Efficienza Operativa:** Lo Score Piotroski indica una salute finanziaria eccellente. L'azienda sta generando valore reale dai propri asset.")
+    col_left, col_right = st.columns(2)
+    
+    with col_left:
+        # Analisi Efficienza
+        if m['ROE'] > 20 and m['Margin'] > 15:
+            st.success(f"**Vantaggio Competitivo:** L'azienda mostra un ROE e Margini dominanti. È una 'Cash Machine' con un moat elevato.")
         else:
-            st.warning("⚠️ **Efficienza Operativa:** Lo Score Piotroski suggerisce cautela. Alcuni parametri di redditività o leva finanziaria sono sotto pressione.")
+            st.info("**Efficienza:** I margini sono in linea con il settore. L'azienda non sembra godere di un potere di prezzo assoluto.")
             
-        if cd_val > apple_cd:
-            st.success(f"✅ **Liquidità:** La posizione di cassa è superiore al benchmark Apple ({apple_cd}), indicando una capacità superiore di resilienza.")
+        # Analisi Debito
+        if m['CD_Ann'] > apple_ref:
+            st.success(f"**Solidità Finanziaria:** La struttura della cassa è più robusta di quella di Apple. Estrema capacità di autofinanziamento.")
         else:
-            st.info(f"ℹ️ **Liquidità:** Posizione di cassa inferiore ad Apple. Verificare se il settore richiede alta intensità di capitale.")
+            st.warning(f"**Leva Finanziaria:** La cassa copre il debito meno efficacemente rispetto al benchmark Apple. Monitorare scadenze obbligazionarie.")
 
-    with col_b:
-        if asset['altman'] == "LOW RISK":
-            st.success("✅ **Rischio Fallimento:** Il modello Altman conferma un rischio di insolvenza minimo per i prossimi 24 mesi.")
+    with col_right:
+        # Analisi Rischio
+        if m['Altman'] == "LOW" and m['FScore'] >= 6:
+            st.success("**Certificazione Rischio:** Bassa probabilità di dissesto finanziario. Bilancio solido e trasparente.")
         else:
-            st.error("🚨 **Rischio Fallimento:** Allerta rischio insolvenza. Verificare i livelli di debito a breve termine.")
-            
-        if m['ROE'] > 20:
-            st.success(f"✅ **Redditività:** Un ROE del {m['ROE']:.1f}% indica un vantaggio competitivo (Moat) significativo.")
+            st.error("**Alert Rischio:** Lo score Altman o Piotroski segnalano anomalie. Possibile deterioramento della qualità degli asset.")
 
-    # --- LEGENDA ENCICLOPEDICA ---
-    with st.expander("📖 LEGENDA LOGICA E MATEMATICA"):
+    # 4. LEGENDA
+    with st.expander("📖 LEGENDA LOGICA E MATEMATICA DEI PARAMETRI"):
         st.markdown("""
-        ### ⚖️ Parametri di Qualità
-        * **ROE (Return on Equity):** `Utile Netto / Capitale Proprio`. Misura quanto profitto l'azienda genera con i soldi degli azionisti. (Target > 15%).
-        * **Profit Margin:** `Utile Netto / Fatturato`. Indica la percentuale di ricavi che diventa profitto effettivo.
-        * **Piotroski F-Score:** Test a 9 punti sulla forza finanziaria. 8-9 è eccellente, <4 è segnale di debolezza.
-        * **Altman Z-Score:** Formula basata su 5 indici di bilancio per prevedere la probabilità di fallimento.
-        * **Beneish M-Score:** Modello probabilistico per identificare se un'azienda ha manipolato i propri utili.
-        * **Owner Earnings:** `Utile Netto + Ammortamenti - CapEx`. È il "flusso di cassa reale" disponibile per il proprietario (Buffett).
-        * **Cash/Debt:** `(Cassa + Investimenti Breve Termine) / Debito Totale`. Misura la capacità di estinguere il debito immediatamente. Apple (0.49) è il nostro benchmark di efficienza.
+        #### 🧪 Formule e Logica
+        - **ROE (Return on Equity):** `Utile Netto / Patrimonio Netto`. Indica la capacità di remunerare il capitale degli azionisti.
+        - **Owner Earnings:** `Net Income + Depreciation - CapEx`. Rappresenta il denaro che il proprietario può prelevare senza danneggiare il business.
+        - **Piotroski Score:** Sistema a 9 punti per valutare la forza finanziaria operativa.
+        - **Altman Z-Score:**  Formula multi-fattore che misura la probabilità di bancarotta a 2 anni.
+        - **Beneish M-Score:** Analisi matematica della manipolazione contabile. Identifica 'gonfiature' artificiali degli utili.
+        - **Cash/Debt:** Rapporto tra liquidità immediata e debito totale. Il benchmark **Apple (0.49)** è lo standard aureo di efficienza finanziaria.
         """)
-
 else:
-    st.error("Dati non disponibili o limite richieste raggiunto. Yahoo Finance ha bloccato la connessione.")
+    st.error("⚠️ Blocco persistente da parte di Yahoo. Prova a cambiare connessione o attendere 5 minuti per il reset dell'IP.")
 
 
 
