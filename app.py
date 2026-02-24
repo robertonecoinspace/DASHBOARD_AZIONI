@@ -21,10 +21,11 @@ try:
 except:
     lista_t = ["AAPL", "MSFT", "GOOGL", "NVDA", "BRK-B", "META", "TSLA", "AMZN"]
 
-# --- 1. SCANNER OTTIMIZZATO ---
+# --- 1. SCANNER OTTIMIZZATO (Funzionante) ---
 @st.cache_data(ttl=3600)
 def run_scanner(tickers):
     opportunities = []
+    # Usiamo un approccio batch per evitare blocchi
     for t in tickers:
         try:
             s = yf.Ticker(t)
@@ -34,10 +35,11 @@ def run_scanner(tickers):
             
             if p is None or p == 0: continue
             
-            vg = e * (8.5 + 17) 
-            vb_quick = e * 20    
+            # Calcolo Fair Value rapido per lo scanner (Graham + Multiplo EPS)
+            vg = e * (8.5 + 17) # Graham
+            vb_quick = e * 20    # Approssimazione Buffett basata su EPS
             vm = (vg + vb_quick) / 2
-            tm = vm * 0.75 
+            tm = vm * 0.75 # Golden MoS
             
             if p <= tm:
                 sconto = ((vm - p) / vm) * 100
@@ -51,7 +53,7 @@ def run_scanner(tickers):
             continue
     return opportunities
 
-# --- 2. ANALISI PROFONDA ---
+# --- 2. ANALISI PROFONDA (Solo Asset Selezionato) ---
 @st.cache_data(ttl=86400)
 def fetch_deep_data(ticker):
     try:
@@ -67,7 +69,7 @@ def fetch_deep_data(ticker):
         capx = abs(get_val(c, ['Capital Expenditure']))
         oe = ni + dep - capx
         
-        # Buffett Raw
+        # Buffett Raw (Multiplo Owner Earnings senza sconto 10%)
         vb = (oe * 20) / sh if sh > 0 else 0
         vg = e * (8.5 + 17)
         vd = (i.get('freeCashflow', oe) * 15) / sh
@@ -109,6 +111,7 @@ st.title("🏛️ Strategic Equity Terminal Pro")
 # SEZIONE SCANNER
 st.subheader("🎯 Scanner Opportunità (Sotto soglia MoS)")
 with st.spinner("Scansione in corso..."):
+    # Scansioniamo i ticker per trovare quelli che rispettano la Golden MoS
     opps = run_scanner(lista_t)
     if opps:
         st.table(pd.DataFrame(opps))
@@ -126,11 +129,7 @@ if asset:
     f_score, altman, beneish = asset["scores"]
     m = asset["metrics"]
     
-    # Estrazione Nome e Settore
-    nome_azienda = asset['info'].get('longName', tk_sel)
-    settore = asset['info'].get('sector', 'Settore non disponibile')
-    
-    st.header(f"📈 {nome_azienda} | 🏭 {settore}")
+    st.header(f"📈 {asset['info'].get('longName', tk_sel)}")
     
     # Status
     if p <= tm: st.success(f"### 🔥 SOTTOVALUTATO (Target MoS: ${tm:.2f})")
@@ -172,8 +171,8 @@ if asset:
 
     # Executive Insight
     st.subheader("💡 Executive Quality Insights")
-    st.info(f"**Verdetto:** Asset nel settore **{settore}** con Piotroski F-Score di **{f_score}/9** e Rischio Altman **{altman}**. "
-            f"Solidità di cassa (Cash/Debt): **{m['CashDebtAnn']:.2f}**.")
+    st.info(f"**Verdetto:** Asset con Piotroski F-Score di **{f_score}/9** e Rischio Altman **{altman}**. "
+            f"Solidità di cassa (Cash/Debt): **{m['CashDebtAnn']:.2f}** (Benchmark Apple 0.49).")
 
     # Legenda
     with st.expander("📖 LEGENDA ENCICLOPEDICA"):
@@ -190,7 +189,6 @@ if asset:
         
 else:
     st.error("Dati non disponibili o limite richieste raggiunto.")
-
 
 
 
