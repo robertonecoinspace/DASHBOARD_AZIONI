@@ -19,6 +19,9 @@ def get_val(df, keys):
 try:
     lista_t = pd.read_csv('lista_ticker.csv')['Ticker'].tolist()
 
+except:
+    lista_t = ["AAPL", "MSFT", "GOOGL", "NVDA", "BRK-B", "META", "TSLA", "AMZN"]
+
 # --- 1. SCANNER OTTIMIZZATO (Funzionante) ---
 @st.cache_data(ttl=3600)
 def run_scanner(tickers):
@@ -192,6 +195,7 @@ if asset:
         
 else:
     st.error("Dati non disponibili o limite richieste raggiunto.")
+
 
 
 
