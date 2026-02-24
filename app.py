@@ -14,7 +14,7 @@ def get_session():
     })
     return session
 
-# --- CORE ENGINE: ANALISI DI BILANCI ---
+# --- CORE ENGINE: ANALISI DI BILANCIO ---
 @st.cache_data(ttl=86400)
 def fetch_certified_quality(ticker):
     try:
@@ -143,6 +143,7 @@ if asset_data:
         
 else:
     st.error("⚠️ Errore di connessione. Se il problema persiste, Yahoo ha bloccato l'IP del server. Prova a riavviare l'app o seleziona un ticker differente.")
+
 
 
 
