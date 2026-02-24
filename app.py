@@ -108,17 +108,6 @@ def fetch_deep_data(ticker):
 # --- UI ---
 st.title("🏛️ Strategic Equity Terminal Pro")
 
-# SEZIONE SCANNER
-st.subheader("🎯 Scanner Opportunità (Sotto soglia MoS)")
-with st.spinner("Scansione in corso..."):
-    # Scansioniamo i ticker per trovare quelli che rispettano la Golden MoS
-    opps = run_scanner(lista_t)
-    if opps:
-        st.table(pd.DataFrame(opps))
-    else:
-        st.info("Nessuna opportunità rilevata con i parametri MoS attuali.")
-
-st.divider()
 
 # ANALISI DETTAGLIATA
 tk_sel = st.sidebar.selectbox("Seleziona Asset per Analisi Profonda:", lista_t)
@@ -194,6 +183,7 @@ if asset:
         
 else:
     st.error("Dati non disponibili o limite richieste raggiunto.")
+
 
 
 
