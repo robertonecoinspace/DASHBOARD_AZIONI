@@ -7,6 +7,12 @@ import os
 # --- CONFIGURAZIONE ---
 st.set_page_config(page_title="Strategic Equity Terminal Pro", layout="wide")
 
+# Estrazione Nome e Settore
+    nome_azienda = asset['info'].get('longName', tk_sel)
+    settore = asset['info'].get('sector', 'Settore non disponibile')
+    
+    st.header(f"📈 {nome_azienda} | 🏭 {settore}")
+
 def get_val(df, keys):
     if df is None or df.empty: return 0
     for k in keys:
@@ -189,6 +195,7 @@ if asset:
         
 else:
     st.error("Dati non disponibili o limite richieste raggiunto.")
+
 
 
 
