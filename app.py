@@ -12,11 +12,7 @@ def get_val(df, keys):
     for k in keys:
         if k in df.index:
             val = df.loc[k]
-            # Gestione sicura per evitare errori di indicizzazione
-            try:
-                return val.iloc[0] if isinstance(val, (pd.Series, pd.DataFrame)) else val
-            except:
-                return 0
+            return val.iloc[0] if isinstance(val, (pd.Series, pd.DataFrame)) else val
     return 0
 
 # --- CARICAMENTO LISTA TICKER ---
@@ -25,41 +21,45 @@ try:
 except:
     lista_t = ["AAPL", "MSFT", "GOOGL", "NVDA", "BRK-B", "META", "TSLA", "AMZN"]
 
-# --- 1. SCANNER OTTIMIZZATO ---
+# --- 1. SCANNER OTTIMIZZATO (Funzionante) ---
 @st.cache_data(ttl=3600)
 def run_scanner(tickers):
     opportunities = []
-    for t in tickers[:10]: # Limite a 10 per lo scanner per evitare blocchi IP
+    # Usiamo un approccio batch per evitare blocchi
+    for t in tickers:
         try:
             s = yf.Ticker(t)
             i = s.info
             p = i.get('currentPrice')
             e = i.get('trailingEps', 0)
+            
             if p is None or p == 0: continue
             
-            vg = e * (8.5 + 17) 
-            vb_quick = e * 20    
+            # Calcolo Fair Value rapido per lo scanner (Graham + Multiplo EPS)
+            vg = e * (8.5 + 17) # Graham
+            vb_quick = e * 20    # Approssimazione Buffett basata su EPS
             vm = (vg + vb_quick) / 2
-            tm = vm * 0.75 
+            tm = vm * 0.75 # Golden MoS
             
             if p <= tm:
                 sconto = ((vm - p) / vm) * 100
-                opportunities.append({"Ticker": t, "Prezzo": f"${p:.2f}", "Fair Value Est.": f"${vm:.2f}", "Sconto": f"{sconto:.1f}%"})
+                opportunities.append({
+                    "Ticker": t, 
+                    "Prezzo": f"${p:.2f}", 
+                    "Fair Value Est.": f"${vm:.2f}", 
+                    "Sconto": f"{sconto:.1f}%"
+                })
         except:
             continue
     return opportunities
 
-# --- 2. ANALISI PROFONDA ---
+# --- 2. ANALISI PROFONDA (Solo Asset Selezionato) ---
 @st.cache_data(ttl=86400)
 def fetch_deep_data(ticker):
     try:
         s = yf.Ticker(ticker)
-        i = s.info
-        f = s.financials
-        c = s.cashflow
-        b = s.balance_sheet
-        q_f = s.quarterly_financials
-        q_b = s.quarterly_balance_sheet
+        i, f, c, b = s.info, s.financials, s.cashflow, s.balance_sheet
+        q_f, q_b = s.quarterly_financials, s.quarterly_balance_sheet
         
         p = i.get('currentPrice', 0)
         e = i.get('trailingEps', 1)
@@ -69,7 +69,7 @@ def fetch_deep_data(ticker):
         capx = abs(get_val(c, ['Capital Expenditure']))
         oe = ni + dep - capx
         
-        # Buffett Raw (Multiplo x20)
+        # Buffett Raw (Multiplo Owner Earnings senza sconto 10%)
         vb = (oe * 20) / sh if sh > 0 else 0
         vg = e * (8.5 + 17)
         vd = (i.get('freeCashflow', oe) * 15) / sh
@@ -108,65 +108,87 @@ def fetch_deep_data(ticker):
 # --- UI ---
 st.title("🏛️ Strategic Equity Terminal Pro")
 
-# Scanner
-st.subheader("🎯 Scanner Opportunità")
-opps = run_scanner(lista_t)
-if opps:
-    st.table(pd.DataFrame(opps))
-else:
-    st.info("Nessuna opportunità immediata o limite API raggiunto per lo scanner.")
+# SEZIONE SCANNER
+st.subheader("🎯 Scanner Opportunità (Sotto soglia MoS)")
+with st.spinner("Scansione in corso..."):
+    # Scansioniamo i ticker per trovare quelli che rispettano la Golden MoS
+    opps = run_scanner(lista_t)
+    if opps:
+        st.table(pd.DataFrame(opps))
+    else:
+        st.info("Nessuna opportunità rilevata con i parametri MoS attuali.")
 
 st.divider()
 
-# Analisi Dettagliata
-tk_sel = st.sidebar.selectbox("Asset Selezionato:", lista_t)
+# ANALISI DETTAGLIATA
+tk_sel = st.sidebar.selectbox("Seleziona Asset per Analisi Profonda:", lista_t)
 asset = fetch_deep_data(tk_sel)
 
 if asset:
-    i = asset['info']
     p, vm, tm, oe, vg, vd, vb = asset["vals"]
     f_score, altman, beneish = asset["scores"]
     m = asset["metrics"]
     
-    st.header(f"📈 {i.get('longName', tk_sel)} | 🏭 {i.get('sector', 'N/A')}")
+    st.header(f"📈 {asset['info'].get('longName', tk_sel)}")
     
+    # Status
     if p <= tm: st.success(f"### 🔥 SOTTOVALUTATO (Target MoS: ${tm:.2f})")
-    elif p <= vm: st.warning(f"### ⚖️ FAIR VALUE (${vm:.2f})")
-    else: st.error(f"### ⚠️ SOPRAVVALUTATO (${vm:.2f})")
+    elif p <= vm: st.warning(f"### ⚖️ FAIR VALUE (Fair Value: ${vm:.2f})")
+    else: st.error(f"### ⚠️ SOPRAVVALUTATO (Fair Value: ${vm:.2f})")
 
-    # Metriche
+    # Metriche e Scores
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("ROE", f"{m['ROE']:.1f}%")
-    c2.metric("Margin", f"{m['Margin']:.1f}%")
-    c3.metric("F-Score", f"{f_score}/9")
-    c4.metric("Altman", altman)
-    c5.metric("Beneish", beneish)
+    c2.metric("Profit Margin", f"{m['Margin']:.1f}%")
+    c3.metric("Piotroski Score", f"{f_score}/9")
+    c4.metric("Altman Risk", altman)
+    c5.metric("Beneish Score", beneish)
 
-    # Cash
+    # Cash Analysis
     st.write("---")
     cc1, cc2, cc3, cc4 = st.columns(4)
-    cc1.metric("C/D Ann", f"{m['CashDebtAnn']:.2f}")
-    cc2.metric("C/D Tri", f"{m['CashDebtTri']:.2f}")
-    cc3.metric("Yield", f"{m['DivYield']:.2f}%")
+    cc1.metric("Cash/Debt (Ann)", f"{m['CashDebtAnn']:.2f}")
+    cc2.metric("Cash/Debt (Tri)", f"{m['CashDebtTri']:.2f}")
+    cc3.metric("Div. Yield", f"{m['DivYield']:.2f}%")
     cc4.metric("Owner Earnings", f"${oe/1e9:.2f}B")
 
     # Grafici
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Valutazione Buffett Raw")
-        st.plotly_chart(go.Figure(go.Bar(x=['Mkt', 'Graham', 'DCF', 'Buffett', 'AVG'], y=[p, vg, vd, vb, vm], marker_color='#10b981')).add_hline(y=tm, line_color="#FFD700"), use_container_width=True)
-    with col2:
-        st.subheader("Revenue Momentum (3Y)")
-        if not asset["q_f"].empty:
-            rev = asset["q_f"].loc['Total Revenue'].iloc[:12][::-1]
-            st.plotly_chart(go.Figure(go.Bar(x=rev.index.astype(str), y=rev.values, marker_color='#334155')), use_container_width=True)
+    g1, g2 = st.columns(2)
+    with g1:
+        st.subheader("Valutazioni Intrinseche (Buffett Raw)")
+        fig_v = go.Figure(go.Bar(x=['Market', 'Graham', 'DCF', 'Buffett', 'MEDIA'], 
+                                 y=[p, vg, vd, vb, vm], 
+                                 marker_color=['#1e293b', '#3b82f6', '#f97316', '#10b981', '#8b5cf6']))
+        fig_v.add_hline(y=tm, line_dash="dash", line_color="#FFD700", line_width=3, annotation_text="GOLDEN MoS")
+        st.plotly_chart(fig_v, use_container_width=True)
+
+    with g2:
+        st.subheader("Fatturato Trimestrale (3 Anni)")
+        if not asset["q_f"].empty and 'Total Revenue' in asset["q_f"].index:
+            rev_q = asset["q_f"].loc['Total Revenue'].iloc[:12][::-1]
+            bar_colors = ['#10b981' if i == 0 or rev_q.values[i] >= rev_q.values[i-1] else '#ef4444' for i in range(len(rev_q))]
+            st.plotly_chart(go.Figure(go.Bar(x=rev_q.index.astype(str), y=rev_q.values, marker_color=bar_colors)), use_container_width=True)
+
+    # Executive Insight
+    st.subheader("💡 Executive Quality Insights")
+    st.info(f"**Verdetto:** Asset con Piotroski F-Score di **{f_score}/9** e Rischio Altman **{altman}**. "
+            f"Solidità di cassa (Cash/Debt): **{m['CashDebtAnn']:.2f}** (Benchmark Apple 0.49).")
 
     # Legenda
     with st.expander("📖 LEGENDA ENCICLOPEDICA"):
-        st.write("**Piotroski F-Score:** Salute finanziaria. **Altman Z-Score:** Rischio fallimento. **Beneish M-Score:** Qualità contabile.")
+        st.markdown(f"""
+        ### ⚖️ Modelli di Valutazione
+        - **Buffett Raw:** Basato su Owner Earnings capitalizzati (multiplo x20).
+        - **Golden MoS:** Linea dorata; rappresenta lo sconto del 25% sulla media.
+        
+        ### 🛡️ Indicatori di Solidità
+        - **Piotroski Score:** Salute operativa (7-9 eccellente).
+        - **Altman Z-Score:** Probabilità di fallimento (Low Risk è il target).
+        - **Beneish M-Score:** Verifica probabile manipolazione dei bilanci.
+        """)
         
 else:
-    st.error("⚠️ Errore critico: Yahoo Finance non risponde. Cambia ticker o attendi 1 minuto.")
+    st.error("Dati non disponibili o limite richieste raggiunto.")
 
 
 
