@@ -129,7 +129,11 @@ if asset:
     f_score, altman, beneish = asset["scores"]
     m = asset["metrics"]
     
-    st.header(f"📈 {asset['info'].get('longName', tk_sel)}")
+    # Estrazione Nome e Settore
+    nome_full = asset['info'].get('longName', tk_sel)
+    settore = asset['info'].get('sector', 'N/A')
+    
+    st.header(f"📈 {nome_full} | 🏭 {settore}")
     
     # Status
     if p <= tm: st.success(f"### 🔥 SOTTOVALUTATO (Target MoS: ${tm:.2f})")
@@ -171,7 +175,7 @@ if asset:
 
     # Executive Insight
     st.subheader("💡 Executive Quality Insights")
-    st.info(f"**Verdetto:** Asset con Piotroski F-Score di **{f_score}/9** e Rischio Altman **{altman}**. "
+    st.info(f"**Verdetto:** Asset nel settore **{settore}** con Piotroski F-Score di **{f_score}/9** e Rischio Altman **{altman}**. "
             f"Solidità di cassa (Cash/Debt): **{m['CashDebtAnn']:.2f}** (Benchmark Apple 0.49).")
 
     # Legenda
@@ -186,6 +190,7 @@ if asset:
         - **Altman Z-Score:** Probabilità di fallimento (Low Risk è il target).
         - **Beneish M-Score:** Verifica probabile manipolazione dei bilanci.
         """)
+        
         
 else:
     st.error("Dati non disponibili o limite richieste raggiunto.")
