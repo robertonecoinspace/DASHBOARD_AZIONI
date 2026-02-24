@@ -25,6 +25,7 @@ except:
 @st.cache_data(ttl=3600)
 def run_scanner(tickers):
     opportunities = []
+    # Usiamo un approccio batch per evitare blocchi
     for t in tickers:
         try:
             s = yf.Ticker(t)
@@ -34,10 +35,11 @@ def run_scanner(tickers):
             
             if p is None or p == 0: continue
             
-            vg = e * (8.5 + 17) 
-            vb_quick = e * 20    
+            # Calcolo Fair Value rapido per lo scanner (Graham + Multiplo EPS)
+            vg = e * (8.5 + 17) # Graham
+            vb_quick = e * 20    # Approssimazione Buffett basata su EPS
             vm = (vg + vb_quick) / 2
-            tm = vm * 0.75 
+            tm = vm * 0.75 # Golden MoS
             
             if p <= tm:
                 sconto = ((vm - p) / vm) * 100
@@ -51,7 +53,7 @@ def run_scanner(tickers):
             continue
     return opportunities
 
-# --- 2. ANALISI PROFONDA ---
+# --- 2. ANALISI PROFONDA (Solo Asset Selezionato) ---
 @st.cache_data(ttl=86400)
 def fetch_deep_data(ticker):
     try:
@@ -67,12 +69,14 @@ def fetch_deep_data(ticker):
         capx = abs(get_val(c, ['Capital Expenditure']))
         oe = ni + dep - capx
         
+        # Buffett Raw (Multiplo Owner Earnings senza sconto 10%)
         vb = (oe * 20) / sh if sh > 0 else 0
         vg = e * (8.5 + 17)
         vd = (i.get('freeCashflow', oe) * 15) / sh
         vm = (vg + vd + vb) / 3
         tm = vm * 0.75 
 
+        # Scores
         f_score = 0
         if i.get('returnOnAssets', 0) > 0: f_score += 2
         if i.get('operatingCashflow', 0) > ni: f_score += 3
@@ -104,8 +108,10 @@ def fetch_deep_data(ticker):
 # --- UI ---
 st.title("🏛️ Strategic Equity Terminal Pro")
 
+# SEZIONE SCANNER
 st.subheader("🎯 Scanner Opportunità (Sotto soglia MoS)")
 with st.spinner("Scansione in corso..."):
+    # Scansioniamo i ticker per trovare quelli che rispettano la Golden MoS
     opps = run_scanner(lista_t)
     if opps:
         st.table(pd.DataFrame(opps))
@@ -114,6 +120,7 @@ with st.spinner("Scansione in corso..."):
 
 st.divider()
 
+# ANALISI DETTAGLIATA
 tk_sel = st.sidebar.selectbox("Seleziona Asset per Analisi Profonda:", lista_t)
 asset = fetch_deep_data(tk_sel)
 
@@ -122,15 +129,18 @@ if asset:
     f_score, altman, beneish = asset["scores"]
     m = asset["metrics"]
     
+    # Estrazione Nome e Settore
     nome_full = asset['info'].get('longName', tk_sel)
     settore = asset['info'].get('sector', 'N/A')
     
     st.header(f"📈 {nome_full} | 🏭 {settore}")
     
+    # Status
     if p <= tm: st.success(f"### 🔥 SOTTOVALUTATO (Target MoS: ${tm:.2f})")
     elif p <= vm: st.warning(f"### ⚖️ FAIR VALUE (Fair Value: ${vm:.2f})")
     else: st.error(f"### ⚠️ SOPRAVVALUTATO (Fair Value: ${vm:.2f})")
 
+    # Metriche e Scores
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("ROE", f"{m['ROE']:.1f}%")
     c2.metric("Profit Margin", f"{m['Margin']:.1f}%")
@@ -138,16 +148,15 @@ if asset:
     c4.metric("Altman Risk", altman)
     c5.metric("Beneish Score", beneish)
 
+    # Cash Analysis
     st.write("---")
     cc1, cc2, cc3, cc4 = st.columns(4)
     cc1.metric("Cash/Debt (Ann)", f"{m['CashDebtAnn']:.2f}")
     cc2.metric("Cash/Debt (Tri)", f"{m['CashDebtTri']:.2f}")
-    
-    # MODIFICA RICHIESTA: DivYield diviso 100
-    cc3.metric("Div. Yield", f"{(m['DivYield'] / 100):.2f}%")
-    
+    cc3.metric("Div. Yield", f"{m['DivYield']:.2f}%")
     cc4.metric("Owner Earnings", f"${oe/1e9:.2f}B")
 
+    # Grafici
     g1, g2 = st.columns(2)
     with g1:
         st.subheader("Valutazioni Intrinseche (Buffett Raw)")
@@ -164,10 +173,12 @@ if asset:
             bar_colors = ['#10b981' if i == 0 or rev_q.values[i] >= rev_q.values[i-1] else '#ef4444' for i in range(len(rev_q))]
             st.plotly_chart(go.Figure(go.Bar(x=rev_q.index.astype(str), y=rev_q.values, marker_color=bar_colors)), use_container_width=True)
 
+    # Executive Insight
     st.subheader("💡 Executive Quality Insights")
     st.info(f"**Verdetto:** Asset nel settore **{settore}** con Piotroski F-Score di **{f_score}/9** e Rischio Altman **{altman}**. "
-            f"Solidità di cassa (Cash/Debt): **{m['CashDebtAnn']:.2f}**.")
+            f"Solidità di cassa (Cash/Debt): **{m['CashDebtAnn']:.2f}** (Benchmark Apple 0.49).")
 
+    # Legenda
     with st.expander("📖 LEGENDA ENCICLOPEDICA"):
         st.markdown(f"""
         ### ⚖️ Modelli di Valutazione
@@ -183,6 +194,7 @@ if asset:
         
 else:
     st.error("Dati non disponibili o limite richieste raggiunto.")
+
 
 
 
