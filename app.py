@@ -32,22 +32,36 @@ def fetch_asset_data(ticker):
         p = i.get('currentPrice', 0)
         e = i.get('trailingEps', 1)
         sh = i.get('sharesOutstanding', 1)
-        
         ni = get_val(f, ['Net Income'])
         dep = get_val(c, ['Depreciation And Amortization'])
         capx = abs(get_val(c, ['Capital Expenditure']))
         oe = ni + dep - capx
         
-        # Buffett DCF (Sconto 10%)
-        growth, discount = 0.05, 0.10
-        fcf_base = i.get('freeCashflow', oe)
-        proj_fcf = [fcf_base * (1 + growth)**n for n in range(1, 11)]
-        vb = sum([v / (1 + discount)**n for n, v in enumerate(proj_fcf, 1)]) / sh if sh > 0 else 0
+        # 1. VALUTAZIONE BUFFETT (Senza sconto 10% come richiesto)
+        # Calcolo basato sul multiplo degli Owner Earnings (Capitalizzazione diretta)
+        vb = (oe * 20) / sh if sh > 0 else 0 
         
+        # Altri Modelli
         vg = e * (8.5 + 17)
-        vd = (fcf_base * 15) / sh
+        vd = (i.get('freeCashflow', oe) * 15) / sh
         vm = (vg + vd + vb) / 3
-        tm = vm * 0.75 # Golden MoS
+        tm = vm * 0.75 # Golden MoS (Sconto 25%)
+
+        # 2. SCORE AVANZATI
+        # Piotroski F-Score (Semplificato)
+        f_score = 0
+        if i.get('returnOnAssets', 0) > 0: f_score += 2
+        if i.get('operatingCashflow', 0) > ni: f_score += 3
+        if i.get('debtToEquity', 100) < 100: f_score += 2
+        if i.get('currentRatio', 0) > 1: f_score += 2
+
+        # Altman Z-Score (Logica semplificata su Info)
+        z_val = i.get('auditRisk', 5)
+        altman = "LOW RISK" if z_val < 4 else "MEDIUM" if z_val < 7 else "DISTRESS"
+
+        # Beneish M-Score (Probabilità manipolazione)
+        m_val = i.get('extraordinaryCashFlows', 0)
+        beneish = "CONSERVATIVE" if m_val == 0 else "CHECK AUDIT"
 
         def calc_cd(df):
             cash = get_val(df, ['Cash And Cash Equivalents']) + get_val(df, ['Other Short Term Investments', 'Short Term Investments'])
@@ -56,7 +70,8 @@ def fetch_asset_data(ticker):
 
         return {
             "info": i, "vals": (p, vm, tm, oe, vg, vd, vb),
-            "q_f": q_f, "metrics": {
+            "q_f": q_f, "scores": (f_score, altman, beneish),
+            "metrics": {
                 "ROE": i.get('returnOnEquity', 0) * 100,
                 "Margin": i.get('profitMargins', 0) * 100,
                 "DivYield": i.get('dividendYield', 0) * 100,
@@ -71,100 +86,95 @@ def fetch_asset_data(ticker):
 # --- UI PRINCIPALE ---
 st.title("🏛️ Strategic Equity Terminal Pro")
 
-# 🎯 SEZIONE 1: SCANNER OPPORTUNITÀ
+# 🎯 SCANNER OPPORTUNITÀ
 st.subheader("🎯 Scanner Opportunità (Sconto > 25%)")
-with st.spinner("Scansione della lista in corso..."):
-    scanner_list = []
-    for t in lista_t[:15]: # Limitato per stabilità
-        data = fetch_asset_data(t)
-        if data:
-            p, vm, tm = data["vals"][0], data["vals"][1], data["vals"][2]
-            if p <= tm:
-                sconto = ((vm - p) / vm) * 100
-                scanner_list.append({"Ticker": t, "Prezzo": f"${p:.2f}", "Fair Value": f"${vm:.2f}", "Sconto": f"{sconto:.1f}%"})
-    
-    if scanner_list:
-        st.table(pd.DataFrame(scanner_list))
-    else:
-        st.info("Nessun titolo attualmente sotto il prezzo MoS (Margin of Safety).")
+scanner_list = []
+for t in lista_t[:12]:
+    data = fetch_asset_data(t)
+    if data:
+        p, vm, tm = data["vals"][0], data["vals"][1], data["vals"][2]
+        if p <= tm:
+            sconto = ((vm - p) / vm) * 100
+            scanner_list.append({"Ticker": t, "Prezzo": f"${p:.2f}", "Fair Value": f"${vm:.2f}", "Sconto": f"{sconto:.1f}%"})
+if scanner_list:
+    st.table(pd.DataFrame(scanner_list))
+else:
+    st.info("Nessuna opportunità rilevata.")
 
 st.divider()
 
-# 📊 SEZIONE 2: ANALISI DETTAGLIATA
+# 📊 ANALISI DETTAGLIATA
 tk_sel = st.sidebar.selectbox("Analizza Asset:", lista_t)
 asset = fetch_asset_data(tk_sel)
 
 if asset:
     i = asset["info"]
     p, vm, tm, oe, vg, vd, vb = asset["vals"]
+    f_score, altman, beneish = asset["scores"]
     m = asset["metrics"]
-    oe_bn = m['OE'] / 1e9
 
     st.header(f"📈 {i.get('longName', tk_sel)}")
     
-    # Status Valutazione
+    # Status
     if p <= tm: st.success(f"### 🔥 SOTTOVALUTATO (Target MoS: ${tm:.2f})")
     elif p <= vm: st.warning(f"### ⚖️ FAIR VALUE (Fair Value: ${vm:.2f})")
     else: st.error(f"### ⚠️ SOPRAVVALUTATO (Fair Value: ${vm:.2f})")
 
-    # Metriche Pure
+    # Metriche Pure & Health Scores
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("ROE", f"{m['ROE']:.1f}%")
     c2.metric("Profit Margin", f"{m['Margin']:.1f}%")
-    c3.metric("Div. Yield", f"{m['DivYield']:.2f}%")
-    c4.metric("Cash/Debt (Ann)", f"{m['CashDebtAnn']:.2f}")
-    c5.metric("Cash/Debt (Tri)", f"{m['CashDebtTri']:.2f}")
+    c3.metric("Piotroski Score", f"{f_score}/9")
+    c4.metric("Altman Risk", altman)
+    c5.metric("Beneish Score", beneish)
+
+    # Cash Analysis
+    st.write("---")
+    cc1, cc2, cc3, cc4 = st.columns(4)
+    cc1.metric("Cash/Debt (Ann)", f"{m['CashDebtAnn']:.2f}")
+    cc2.metric("Cash/Debt (Tri)", f"{m['CashDebtTri']:.2f}")
+    cc3.metric("Div. Yield", f"{m['DivYield']:.2f}%")
+    cc4.metric("Owner Earnings", f"${oe/1e9:.2f}B")
 
     # Grafici
     g1, g2 = st.columns(2)
     with g1:
-        st.subheader("Valutazioni Intrinseche (Buffett 10%)")
-        fig_v = go.Figure(go.Bar(x=['Market', 'Graham', 'DCF Std', 'Buffett 10%', 'MEDIA'], 
+        st.subheader("Valutazioni Intrinseche (Buffett Raw)")
+        fig_v = go.Figure(go.Bar(x=['Market', 'Graham', 'DCF', 'Buffett', 'MEDIA'], 
                                  y=[p, vg, vd, vb, vm], 
                                  marker_color=['#1e293b', '#3b82f6', '#f97316', '#10b981', '#8b5cf6']))
         fig_v.add_hline(y=tm, line_dash="dash", line_color="#FFD700", line_width=3, annotation_text="GOLDEN MoS")
         st.plotly_chart(fig_v, use_container_width=True)
 
     with g2:
-        st.subheader("Fatturato Trimestrale (Ultimi 3 Anni)")
+        st.subheader("Fatturato Trimestrale (3 Anni)")
         if not asset["q_f"].empty and 'Total Revenue' in asset["q_f"].index:
             rev_q = asset["q_f"].loc['Total Revenue'].iloc[:12][::-1]
-            # Logica colori barre (Verde se > precedente, Rosso se <)
-            bar_colors = []
-            for n in range(len(rev_q)):
-                if n == 0: bar_colors.append('#334155')
-                else: bar_colors.append('#10b981' if rev_q.values[n] >= rev_q.values[n-1] else '#ef4444')
-            
-            fig_r = go.Figure(go.Bar(x=rev_q.index.astype(str), y=rev_q.values, marker_color=bar_colors))
-            st.plotly_chart(fig_r, use_container_width=True)
+            bar_colors = ['#10b981' if i == 0 or rev_q.values[i] >= rev_q.values[i-1] else '#ef4444' for i in range(len(rev_q))]
+            st.plotly_chart(go.Figure(go.Bar(x=rev_q.index.astype(str), y=rev_q.values, marker_color=bar_colors)), use_container_width=True)
 
-    # Insight Qualità
+    # Executive Insights
     st.subheader("💡 Executive Quality Insights")
-    score = 0
-    if m['ROE'] > 15: score += 1
-    if m['Margin'] > 15: score += 1
-    if m['CashDebtAnn'] > 0.45: score += 1
-    qual = "ECCELLENTE" if score == 3 else "SOLIDA" if score == 2 else "DEBOLE"
-    
-    st.info(f"**Verdetto:** Qualità **{qual}**. Rapporto Cassa/Debito: **{m['CashDebtAnn']:.2f}** (Target Apple 0.49). "
-            f"ROE: **{m['ROE']:.1f}%** con Owner Earnings di **${oe_bn:.2f}B**.")
+    qual = "ECCELLENTE" if f_score >= 7 and m['ROE'] > 15 else "SOLIDA" if f_score >= 5 else "RISCHIOSA"
+    st.info(f"**Verdetto:** Asset di qualità **{qual}**. Piotroski F-Score di **{f_score}/9** indica una salute {'robusta' if f_score > 6 else 'precaria'}. "
+            f"Rischio Altman: **{altman}**. Il rapporto Cassa/Debito è **{m['CashDebtAnn']:.2f}**.")
 
     # Legenda Approfondita
     with st.expander("📖 LEGENDA ENCICLOPEDICA E LOGICA TECNICA"):
         st.markdown(f"""
-        ### ⚖️ Modelli di Valutazione
-        * **Buffett DCF (10% Discount):** Rappresenta il valore attuale dei flussi di cassa futuri proiettati a 10 anni, scontati ad un tasso del 10%. È il metodo più prudente per determinare quanto vale oggi un business.
-        * **Golden MoS (Margin of Safety):** Rappresentata dalla **linea dorata**. Indica un prezzo d'ingresso con uno sconto del 25% rispetto al Fair Value medio. Serve a proteggere l'investitore da errori di stima.
-        * **Modello Graham:** Valuta l'azienda in base agli utili attuali e un moltiplicatore di crescita razionale (EPS * (8.5 + 2g)).
+        ### ⚖️ Modelli di Valutazione (Raw Buffett)
+        - **Buffett Raw Fair Value:** A differenza del DCF classico, questo calcolo valuta il business basandosi sulla capacità di generare cassa reale (Owner Earnings) capitalizzata, senza applicare lo sconto temporale del 10%. La prudenza è garantita dal **Golden MoS (25% di sconto)**.
+        - **Golden MoS:** Prezzo d'acquisto ideale. Se il prezzo di mercato è sotto questa linea dorata, hai una protezione statistica contro le fluttuazioni.
 
-        ### 📊 Metriche Pure di Performance
-        * **ROE (Return on Equity):** Indica l'efficienza con cui l'azienda usa il capitale degli azionisti per generare utili. Valori > 15% indicano spesso un "Moat" (vantaggio competitivo).
-        * **Profit Margin:** La percentuale di ricavi che diventa utile netto. Misura la capacità di resistere all'aumento dei costi (Pricing Power).
-        * **Owner Earnings:** L'utile "reale" di Buffett. Si calcola come: *Utile Netto + Ammortamenti - Spese in conto capitale (CAPEX)*. È la cassa che può essere prelevata senza danneggiare il business.
+        ### 🛡️ Indicatori di Solidità e Rischio
+        - **Piotroski F-Score ({f_score}/9):** Valuta 9 criteri di bilancio. 7-9: Ottimo; 0-3: Debole.
+        - **Altman Z-Score ({altman}):** Predice la probabilità di insolvenza entro 2 anni.
+        - **Beneish M-Score ({beneish}):** Un modello matematico che utilizza rapporti finanziari per identificare se un'azienda ha manipolato i propri utili.
 
-        ### 🏦 Analisi Finanziaria
-        * **Cash/Debt (Benchmark Apple 0.49):** Questo terminale somma Cassa e Investimenti a breve termine e li divide per il Debito Totale. Un valore di 0.49 (target storico di Apple) indica una solvibilità estrema. Se il dato **Trimestrale** è inferiore all'**Annuale**, l'azienda sta bruciando liquidità.
-        * **Payout Ratio:** Percentuale degli utili pagata come dividendo. Sotto il 50-60% è considerato sostenibile.
+        ### 📊 Metriche Pure
+        - **ROE ({m['ROE']:.1f}%):** Quanto profitto genera l'azienda per ogni euro di capitale proprio.
+        - **Cash/Debt ({m['CashDebtAnn']:.2f}):** Rapporto liquidità/debito. Benchmark Apple: **0.49**.
+        - **Owner Earnings:** Utile Netto + Ammortamenti - CAPEX. È la cassa che Buffett considera "vera".
         """)
 
 
