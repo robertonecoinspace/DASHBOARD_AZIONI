@@ -153,7 +153,7 @@ if asset:
     cc1, cc2, cc3, cc4 = st.columns(4)
     cc1.metric("Cash/Debt (Ann)", f"{m['CashDebtAnn']:.2f}")
     cc2.metric("Cash/Debt (Tri)", f"{m['CashDebtTri']:.2f}")
-    cc3.metric("Div. Yield", f"{m['DivYield']:.2f}%")
+    cc3.metric("Div. Yield", f"{(m['DivYield'] / 100):.2f}%")
     cc4.metric("Owner Earnings", f"${oe/1e9:.2f}B")
 
     # Grafici
@@ -194,6 +194,7 @@ if asset:
         
 else:
     st.error("Dati non disponibili o limite richieste raggiunto.")
+
 
 
 
