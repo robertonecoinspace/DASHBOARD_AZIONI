@@ -4,14 +4,15 @@ import pandas as pd
 import plotly.graph_objects as go
 from fpdf import FPDF
 import os
+import time
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="Strategic Equity Terminal", layout="wide")
+st.set_page_config(page_title="Strategic Equity Terminal Pro", layout="wide")
 
-# Tema
+# Tema Dinamico
 tema = st.sidebar.radio("Tema Dashboard:", ["Dark", "Light"])
 if tema == "Dark":
-    st.markdown("<style>.main { background-color: #0e1117; color: white; } .stMetric { background-color: #161b22; border: 1px solid #30363d; }</style>", unsafe_allow_html=True)
+    st.markdown("<style>.main { background-color: #0e1117; color: white; } .stMetric { background-color: #161b22; border: 1px solid #30363d; border-radius: 10px; }</style>", unsafe_allow_html=True)
 
 # --- CARICAMENTO LISTA TICKER ---
 @st.cache_data
@@ -36,12 +37,13 @@ def get_macro_data(period="1mo"):
     for etf, name in sectors.items():
         try:
             d = yf.Ticker(etf).history(period=p_map[period])
-            perf = ((d['Close'].iloc[-1] / d['Close'].iloc[0]) - 1) * 100
-            res[name] = perf
+            if not d.empty:
+                perf = ((d['Close'].iloc[-1] / d['Close'].iloc[0]) - 1) * 100
+                res[name] = perf
         except: res[name] = 0
     
-    # Stima Ciclo Economico
     def estimate_cycle(data):
+        if not data: return "N/D"
         top = max(data, key=data.get)
         if top in ['Tech', 'Industrials']: return "ESPANSIONE (Early/Mid Cycle)"
         if top in ['Energy', 'Financials']: return "PICCO (Late Cycle)"
@@ -50,12 +52,19 @@ def get_macro_data(period="1mo"):
     
     return res, estimate_cycle(res)
 
-# --- ANALISI PROFONDA ---
-@st.cache_data(ttl=3600)
+# --- ANALISI PROFONDA (OTTIMIZZATA) ---
+@st.cache_data(ttl=86400) # Cache 24 ore per proteggere l'IP
 def fetch_stock_data(ticker):
     try:
         s = yf.Ticker(ticker)
-        i, f, c, b, qb = s.info, s.financials, s.cashflow, s.balance_sheet, s.quarterly_balance_sheet
+        # Chiamate raggruppate
+        i = s.info
+        if not i or 'currentPrice' not in i: return None
+        
+        f = s.financials
+        c = s.cashflow
+        b = s.balance_sheet
+        qb = s.quarterly_balance_sheet
         q_f = s.quarterly_financials
         
         def gv(df, keys):
@@ -66,27 +75,21 @@ def fetch_stock_data(ticker):
                     return val.iloc[0] if isinstance(val, (pd.Series, pd.DataFrame)) else val
             return 0
 
-        p = i.get('currentPrice', 0)
-        e = i.get('trailingEps', 1)
-        sh = i.get('sharesOutstanding', 1)
+        p, e, sh = i.get('currentPrice', 0), i.get('trailingEps', 1), i.get('sharesOutstanding', 1)
         ni = gv(f, ['Net Income'])
-        fcf = i.get('freeCashflow', 0)
+        fcf = i.get('freeCashflow', ni * 0.8)
         
         # Buffett DCF (Sconto 10%)
-        # Assunzione: crescita conservativa 5% per 10 anni, poi terminal value
-        growth = 0.05
-        discount_rate = 0.10
+        growth, discount_rate = 0.05, 0.10
         projected_fcf = [fcf * (1 + growth)**n for n in range(1, 11)]
         dcf_val = sum([val / (1 + discount_rate)**n for n, val in enumerate(projected_fcf, 1)])
         vb = dcf_val / sh if sh > 0 else 0
         
-        # Altri Modelli
         vg = e * (8.5 + 17)
         vd = (fcf * 15) / sh
         vm = (vg + vd + vb) / 3
         tm = vm * 0.75
 
-        # CASSA/DEBITO CERTIFICATO (AAPL 0.49)
         def calc_cd(df):
             cash = gv(df, ['Cash And Cash Equivalents']) + gv(df, ['Other Short Term Investments', 'Short Term Investments'])
             debt = gv(df, ['Total Debt'])
@@ -106,7 +109,24 @@ def fetch_stock_data(ticker):
             },
             'info': i, 'q_f': q_f, 'sector': i.get('sector', 'N/A')
         }
-    except: return None
+    except Exception as ex:
+        if "429" in str(ex): st.error("⚠️ Yahoo Finance: Troppe richieste. Riprova più tardi.")
+        return None
+
+# --- FAST SCAN LOGIC ---
+@st.cache_data(ttl=3600)
+def fast_scan_logic(tickers):
+    results = []
+    for t in tickers[:12]: # Limite ridotto per evitare blocchi IP
+        try:
+            inf = yf.Ticker(t).info
+            cp, tp = inf.get('currentPrice', 0), inf.get('targetMeanPrice', 0)
+            roe, margin = inf.get('returnOnEquity', 0), inf.get('profitMargins', 0)
+            moat = "💎 WIDE MOAT" if roe > 0.15 and margin > 0.20 else "Standard"
+            if cp > 0 and (tp > cp * 1.15 or moat == "💎 WIDE MOAT"):
+                results.append({"Ticker": t, "Upside": f"{((tp/cp)-1)*100:.1f}%", "Moat/Leader": moat, "ROE": f"{roe*100:.1f}%"})
+        except: continue
+    return results
 
 # --- UI MAIN ---
 st.title("🏛️ Strategic Equity Terminal Pro")
@@ -122,26 +142,16 @@ for idx, (name, val) in enumerate(macro_res.items()):
 
 st.info(f"🧭 **Insight Ciclo:** La forza relativa attuale indica una fase di: **{ciclo}**")
 
+
 st.divider()
 
-# 2. FAST SCAN (MOAT & UPSIDE)
+# 2. FAST SCAN
 st.subheader("🎯 Fast Scan: Leader & Candidati Sottovalutati")
-@st.cache_data(ttl=3600)
-def fast_scan_logic(tickers):
-    results = []
-    for t in tickers[:15]:
-        try:
-            inf = yf.Ticker(t).info
-            cp, tp = inf.get('currentPrice', 0), inf.get('targetMeanPrice', 0)
-            roe, margin = inf.get('returnOnEquity', 0), inf.get('profitMargins', 0)
-            # Definizione Leader: ROE > 15% e Margine > 20%
-            moat = "💎 WIDE MOAT" if roe > 0.15 and margin > 0.20 else "Standard"
-            if cp > 0 and (tp > cp * 1.15 or moat == "💎 WIDE MOAT"):
-                results.append({"Ticker": t, "Upside": f"{((tp/cp)-1)*100:.1f}%", "Moat/Leader": moat, "ROE": f"{roe*100:.1f}%"})
-        except: continue
-    return results
-
-st.table(pd.DataFrame(fast_scan_logic(TICKERS_LIST)))
+fast_results = fast_scan_logic(TICKERS_LIST)
+if fast_results:
+    st.table(pd.DataFrame(fast_results))
+else:
+    st.info("Nessuna opportunità rilevata o limite API raggiunto.")
 
 st.divider()
 
@@ -149,11 +159,10 @@ st.divider()
 st.sidebar.subheader("🏢 Selezione Asset")
 tk_sel = st.sidebar.selectbox("Analizza Ticker:", TICKERS_LIST)
 
-with st.spinner(f"Analisi in corso: {tk_sel}..."):
+with st.spinner(f"Sincronizzazione dati per {tk_sel}..."):
     d = fetch_stock_data(tk_sel)
 
 if d:
-    # Header e Metriche
     st.header(f"📈 {tk_sel} | {d['info'].get('longName', '')}")
     
     if d['p'] <= d['tm']: st.success(f"🔥 SOTTOVALUTATO (Target MoS: ${d['tm']:.2f})")
@@ -168,7 +177,6 @@ if d:
     c4.metric("Cash/Debt (Ann)", f"{m['CashDebtAnn']:.2f}")
     c5.metric("Cash/Debt (Tri)", f"{m['CashDebtTri']:.2f}")
 
-    # Grafici
     g1, g2 = st.columns(2)
     with g1:
         st.write("**Valutazione (Modello Buffett 10% Disc)**")
@@ -180,31 +188,28 @@ if d:
 
     with g2:
         st.write("**Revenue Trimestrale (Ultimi 3 Anni)**")
-        rev_q = d['q_f'].loc['Total Revenue'].iloc[:12][::-1]
-        colors = ['#10b981' if i == 0 or rev_q.values[i] >= rev_q.values[i-1] else '#ef4444' for i in range(len(rev_q))]
-        fig_r = go.Figure()
-        fig_r.add_trace(go.Bar(x=rev_q.index.astype(str), y=rev_q.values, marker_color=colors))
-        fig_r.add_trace(go.Scatter(x=rev_q.index.astype(str), y=rev_q.values, mode='lines', line=dict(color='black')))
-        st.plotly_chart(fig_r, use_container_width=True)
+        if not d['q_f'].empty and 'Total Revenue' in d['q_f'].index:
+            rev_q = d['q_f'].loc['Total Revenue'].iloc[:12][::-1]
+            colors = ['#10b981' if i == 0 or rev_q.values[i] >= rev_q.values[i-1] else '#ef4444' for i in range(len(rev_q))]
+            fig_r = go.Figure()
+            fig_r.add_trace(go.Bar(x=rev_q.index.astype(str), y=rev_q.values, marker_color=colors))
+            fig_r.add_trace(go.Scatter(x=rev_q.index.astype(str), y=rev_q.values, mode='lines', line=dict(color='black')))
+            st.plotly_chart(fig_r, use_container_width=True)
 
-    # EXECUTIVE INSIGHTS
     st.info(f"""
     💡 **Executive Insights per {tk_sel}:**
-    * **Qualità del Business:** Il ROE del **{m['ROE']:.1f}%** e il Margine del **{m['Margin']:.1f}%** indicano la presenza di un vantaggio competitivo.
-    * **Efficienza di Cassa:** Owner Earnings stimati in **${m['OwnerEarnings']/1e9:.1f}B**. 
-    * **Sostenibilità:** Con un Payout Ratio del **{m['Payout']:.1f}%**, il dividendo risulta {'sostenibile' if m['Payout'] < 60 else 'da monitorare'}.
-    * **Solvibilità:** Rapporto Cash/Debt annuale di **{m['CashDebtAnn']:.2f}** (Target Apple 0.49 centrato).
+    * **Qualità:** ROE al **{m['ROE']:.1f}%** e Margine al **{m['Margin']:.1f}%**.
+    * **Efficienza:** Owner Earnings stimati in **${m['OwnerEarnings']/1e9:.1f}B**. 
+    * **Solvibilità:** Rapporto Cash/Debt annuale di **{m['CashDebtAnn']:.2f}** (Target Apple 0.49).
     """)
 
-    # LEGENDA DINAMICA
     with st.expander(f"📖 LEGENDA E APPROFONDIMENTO: {tk_sel}"):
         st.markdown(f"""
-        ### Metriche Finanziarie
-        - **ROE ({m['ROE']:.1f}%):** Indica quanto profitto genera l'azienda con i soldi degli azionisti. Sopra il 15% è eccellente.
-        - **Buffett DCF (10%):** Valutazione basata sulla proiezione dei flussi di cassa per 10 anni, attualizzati con un tasso di sconto del 10% (il rendimento minimo atteso da Buffett).
-        - **Cash/Debt ({m['CashDebtAnn']:.2f}):** Rapporto tra liquidità immediata (Cash + Short Term Inv.) e debito totale. Per Apple il valore corretto è circa **0.49**.
-        - **Profit Margin ({m['Margin']:.1f}%):** Percentuale di fatturato che diventa utile netto.
+        - **ROE ({m['ROE']:.1f}%):** Redditività del capitale proprio. Ottimo sopra il 15%.
+        - **Buffett DCF (10%):** Flussi di cassa scontati al rendimento minimo richiesto del 10%.
+        - **Cash/Debt:** Cassa e investimenti brevi diviso debito totale. Valore Apple: **0.49**.
         """)
+
 
 
 
