@@ -88,7 +88,68 @@ if asset:
     
     st.header(f"📈 {i.get('longName', tk_sel)}")
     
-    if p <= tm: st.success(f"### 🔥 SOTTOVALUTATO (Target MoS: ${
+    if p <= tm: st.success(f"### 🔥 SOTTOVALUTATO (Target MoS: ${tm:.2f})")
+    elif p <= vm: st.warning(f"### ⚖️ PREZZO EQUO (Fair Value: ${vm:.2f})")
+    else: st.error(f"### ⚠️ SOPRAVVALUTATO (Fair Value: ${vm:.2f})")
+
+    # METRICHE PURE
+    st.subheader("📋 Metriche Pure & Analisi Cassa")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("ROE", f"{m['ROE']:.1f}%")
+    c2.metric("Profit Margin", f"{m['Margin']:.1f}%")
+    c3.metric("Div. Yield", f"{m['DivYield']:.2f}%")
+    c4.metric("Cash/Debt (Ann)", f"{m['CashDebtAnn']:.2f}")
+    c5.metric("Cash/Debt (Tri)", f"{m['CashDebtTri']:.2f}")
+    
+    sc1, sc2, sc3 = st.columns(3)
+    sc1.metric("Owner Earnings", f"${oe_billions:.2f}B")
+    sc2.metric("Payout Ratio", f"{m['Payout']:.1f}%")
+    sc3.metric("Market Cap", f"${m_cap_trillions:.2f}T")
+
+    st.divider()
+
+    # GRAFICI
+    g1, g2 = st.columns(2)
+    with g1:
+        st.subheader("Valutazioni Intrinseche (Buffett 10%)")
+        fig_v = go.Figure(go.Bar(x=['Market', 'Graham', 'DCF Std', 'Buffett 10%', 'MEDIA'], 
+                                 y=[p, vg, vd, vb, vm], 
+                                 marker_color=['#1e293b', '#3b82f6', '#f97316', '#10b981', '#8b5cf6']))
+        fig_v.add_hline(y=tm, line_dash="dash", line_color="#FFD700", line_width=3, annotation_text="GOLDEN MoS")
+        st.plotly_chart(fig_v, use_container_width=True)
+
+    with g2:
+        st.subheader("Andamento Fatturato (Revenue)")
+        if not asset["f"].empty and 'Total Revenue' in asset["f"].index:
+            rev_data = asset["f"].loc['Total Revenue'].iloc[::-1]
+            fig_r = go.Figure(go.Bar(x=rev_data.index.astype(str), y=rev_data.values, marker_color='#334155'))
+            st.plotly_chart(fig_r, use_container_width=True)
+
+    # QUALITY INSIGHTS
+    st.subheader("💡 Executive Quality Insights")
+    score = 0
+    if m['ROE'] > 15: score += 1
+    if m['Margin'] > 15: score += 1
+    if m['CashDebtAnn'] > 0.45: score += 1
+    qual = "ECCELLENTE" if score == 3 else "SOLIDA" if score == 2 else "DEBOLE"
+    
+    st.info(f"**Verdetto:** Asset di qualità **{qual}**. Rapporto Cassa/Debito a **{m['CashDebtAnn']:.2f}** (Target Apple 0.49). "
+            f"ROE al **{m['ROE']:.1f}%** con Owner Earnings di **${oe_billions:.2f}B**.")
+
+    # LEGENDA
+    with st.expander("📖 LEGENDA E LOGICA DI ANALISI"):
+        st.markdown(f"""
+        ### 💰 Modelli di Valutazione
+        - **Buffett 10%:** Valore basato sui flussi di cassa proiettati a 10 anni e scontati al 10%.
+        - **Golden MoS:** Linea dorata; rappresenta lo sconto del 25% sulla media dei modelli.
+        
+        ### 📊 Metriche Pure
+        - **ROE:** Return on Equity. Sopra il 15% indica un forte vantaggio competitivo.
+        - **Cash/Debt:** Rapporto tra liquidità e debito. Apple ha un benchmark di circa 0.49.
+        - **Owner Earnings:** Utile Netto + Ammortamenti - CAPEX. La cassa reale prodotta.
+        """)
+else:
+    st.error("Dati non disponibili per questo Ticker.")
 
 
 
