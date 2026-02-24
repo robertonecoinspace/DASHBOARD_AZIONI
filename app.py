@@ -8,7 +8,7 @@ import requests
 st.set_page_config(page_title="Strategic Equity Terminal Pro", layout="wide")
 
 # INSERISCI QUI LA TUA API KEY DI FINANCIAL MODELING PREP
-dPrkP3WNj0gkNIT71CKIZYM8iX3e6tKG
+API_KEY = "dPrkP3WNj0gkNIT71CKIZYM8iX3e6tKG"
 
 # --- CARICAMENTO TICKERS ---
 try:
@@ -154,6 +154,7 @@ else:
 
     else:
         st.error("⚠️ Errore nel recupero dati dall'API. Verifica la tua API KEY o il Ticker.")
+
 
 
 
