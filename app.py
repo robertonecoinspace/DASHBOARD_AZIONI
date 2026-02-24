@@ -194,7 +194,8 @@ if d:
     with st.expander(f"📖 Legenda e Approfondimento: {tk_sel}"):
         st.write(f"Dati basati sull'ultimo bilancio di {tk_sel}. La linea dorata rappresenta lo sconto del 25% rispetto al valore intrinseco medio.")
 else:
-    st.error("Seleziona un altro ticker o controlla la connessione.
+    st.error("Seleziona un altro ticker o controlla la connessione.I dati per questo asset non sono al momento disponibili.")
+
 
 
 
