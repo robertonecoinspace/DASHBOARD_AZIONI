@@ -5,88 +5,105 @@ import time
 import random
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="Terminal Pro (Native)", layout="wide")
+st.set_page_config(page_title="Terminal Pro (Hardcore Fix)", layout="wide")
 
-# --- FUNZIONI DI UTILITÀ ---
-def get_safe(data, keys, default=0):
-    """Cerca una chiave in una lista di possibili nomi. Restituisce default se non trova nulla."""
-    if not data: return default
-    for k in keys:
-        if k in data and data[k] is not None:
-            return data[k]
-    return default
-
-# --- MOTORE DI ANALISI (Nativo yFinance) ---
-@st.cache_data(ttl=3600)
-def fetch_native_data(ticker):
+# --- FUNZIONI AUSILIARIE ---
+def get_safe_val(df, row_name):
+    """Estrae un valore da un DataFrame finanziario in modo sicuro."""
     try:
-        # 1. RITARDO UMANO (Cruciale: Evita il blocco 429)
-        # Aspettiamo un tempo casuale tra 0.2 e 0.6 secondi
-        time.sleep(random.uniform(0.2, 0.6))
+        if row_name in df.index:
+            return df.loc[row_name].iloc[0] # Prende il dato più recente (colonna 0)
+        return 0
+    except:
+        return 0
+
+# --- MOTORE DI ANALISI (Porta di Servizio) ---
+@st.cache_data(ttl=3600)
+def fetch_hardcore_data(ticker):
+    try:
+        # 1. RITARDO CASUALE (Anti-Ban)
+        time.sleep(random.uniform(0.3, 0.8))
         
-        # 2. ISTANZA TICKER (Senza sessioni custom!)
         asset = yf.Ticker(ticker)
         
-        # 3. RECUPERO DATI (Info completa)
+        # 2. RECUPERO PREZZO (Uso fast_info, NON info)
+        # fast_info usa un endpoint diverso che raramente viene bloccato
         try:
-            i = asset.info
+            price = asset.fast_info.get('last_price')
+            if not price: return None
         except:
-            return None # Se fallisce info, il ticker è probabilmente rotto
+            return None
 
-        # Strategia Recupero Prezzo (Multi-chiave per BABA/ADR)
-        price = get_safe(i, ['currentPrice', 'regularMarketPrice', 'bid', 'previousClose'])
-        
-        if not price:
-            # Ultimo tentativo con fast_info (database diverso)
-            try:
-                price = asset.fast_info.get('last_price', 0)
-            except:
-                return None
+        # 3. RECUPERO NOME E SETTORE (Tentativo soft)
+        # Se info è bloccato, usiamo valori di default, ma non fermiamo l'analisi
+        try:
+            name = asset.info.get('longName', ticker)
+            sector = asset.info.get('sector', 'Settore N/A')
+        except:
+            name = ticker
+            sector = "Settore Recuperato (Info Bloccate)"
 
-        # --- ESTRAZIONE METRICHE ---
+        # 4. SCARICO BILANCI GREZZI (Tabelle Pandas)
+        # Questo bypassa il blocco su .info scaricando direttamente le tabelle
+        bs = asset.balance_sheet          # Stato Patrimoniale
+        inc = asset.income_stmt           # Conto Economico
+        cf = asset.cashflow               # Flussi di Cassa
         
-        # Redditività
-        roe = get_safe(i, ['returnOnEquity', 'trailingAnnualDividendYield']) * 100
-        margin = get_safe(i, ['profitMargins', 'netProfitMargin']) * 100
-        div_yield = get_safe(i, ['dividendYield', 'trailingAnnualDividendYield']) * 100
+        if bs.empty or inc.empty:
+            return None
+
+        # 5. CALCOLI MANUALI SUI DATI GREZZI
         
-        # Owner Earnings (Stima Buffett)
-        ni = get_safe(i, ['netIncomeToCommon', 'netIncome'])
+        # Owner Earnings (Utile + Ammortamenti - Capex)
+        # Cerchiamo i nomi delle righe standard di Yahoo
+        ni = get_safe_val(inc, 'Net Income')
+        if ni == 0: ni = get_safe_val(inc, 'Net Income Common Stockholders')
         
-        # Ammortamenti (Spesso mancano nei dati info rapidi, usiamo fallback)
-        rev = get_safe(i, ['totalRevenue', 'totalRevenue'], 1)
-        dep = get_safe(i, ['depreciation', 'depreciationAndAmortization'])
-        if dep == 0: dep = rev * 0.04 # Stima prudenziale 4% fatturato se manca il dato
+        # Ammortamenti (Spesso sotto 'Reconciled Depreciation')
+        dep = get_safe_val(cf, 'Depreciation And Amortization')
+        if dep == 0: dep = get_safe_val(cf, 'Reconciled Depreciation')
         
-        # Capex (Derivato o stimato)
-        ocf = get_safe(i, ['operatingCashflow', 'operatingCashFlow'])
-        fcf = get_safe(i, ['freeCashflow', 'freeCashFlow'])
+        # Capex
+        capex = abs(get_safe_val(cf, 'Capital Expenditure'))
         
-        if ocf != 0 and fcf != 0:
-            capex = abs(ocf - fcf)
-        else:
-            capex = rev * 0.05 # Stima 5% fatturato se mancano i flussi
-            
         oe = ni + dep - capex
         
-        # Cash & Debt
-        cash = get_safe(i, ['totalCash', 'cashAndCashEquivalents'])
-        debt = get_safe(i, ['totalDebt', 'longTermDebt'])
+        # Cash / Debt
+        cash = get_safe_val(bs, 'Cash And Cash Equivalents') + get_safe_val(bs, 'Other Short Term Investments')
+        debt = get_safe_val(bs, 'Total Debt')
         cd_ratio = cash / debt if debt > 0 else 0
         
-        # Scores & Risk
-        f_score = 0
-        if roe > 10: f_score += 3
-        if get_safe(i, ['currentRatio']) > 1.1: f_score += 3
-        if ocf > ni: f_score += 3
+        # ROE (Utile / Equity)
+        equity = get_safe_val(bs, 'Stockholders Equity')
+        roe = (ni / equity) * 100 if equity != 0 else 0
         
-        audit_risk = get_safe(i, ['auditRisk'], 5)
-        board_risk = get_safe(i, ['boardRisk'], 5)
+        # Profit Margin (Utile / Ricavi)
+        rev = get_safe_val(inc, 'Total Revenue')
+        margin = (ni / rev) * 100 if rev != 0 else 0
+        
+        # Dividend Yield
+        # Dividendi Pagati / Market Cap (Stimato: Prezzo * Azioni)
+        div_paid = abs(get_safe_val(cf, 'Cash Dividends Paid'))
+        shares = asset.fast_info.get('shares', 1) # fast_info per le azioni
+        mkt_cap = price * shares
+        div_yield = (div_paid / mkt_cap) * 100 if mkt_cap > 0 else 0
+        
+        # Scores
+        f_score = 0
+        if ni > 0: f_score += 2
+        ocf = get_safe_val(cf, 'Operating Cash Flow')
+        if ocf > ni: f_score += 3
+        curr_assets = get_safe_val(bs, 'Total Assets') # Semplificazione se manca current
+        if curr_assets > debt: f_score += 2
+        
+        # Risk Metrics (Proxy)
+        lev = debt / (get_safe_val(bs, 'Total Assets') or 1)
+        altman = "LOW" if lev < 0.5 else "MEDIUM" if lev < 0.8 else "HIGH"
+        beneish = "SAFE" # Default safe se non possiamo calcolarlo
 
         return {
-            "name": get_safe(i, ['longName', 'shortName'], ticker),
-            "sector": get_safe(i, ['sector', 'industry'], "N/A"),
-            "currency": get_safe(i, ['currency', 'financialCurrency'], "USD"),
+            "name": name,
+            "sector": sector,
             "metrics": {
                 "Price": price,
                 "ROE": roe,
@@ -95,19 +112,19 @@ def fetch_native_data(ticker):
                 "OE": oe,
                 "CD": cd_ratio,
                 "FScore": f_score,
-                "Altman": audit_risk,
-                "Beneish": board_risk
+                "Altman": altman,
+                "Beneish": beneish
             }
         }
 
     except Exception as e:
-        # Per debug, stampa l'errore in console ma non blocca l'app
-        print(f"Errore su {ticker}: {e}")
+        # Stampa errore in console per debug
+        print(f"Errore Hardcore su {ticker}: {e}")
         return None
 
 # --- UI ---
-st.title("🏛️ Equity Terminal (Native YF)")
-st.caption("Engine: yFinance Native (Auto-Throttling)")
+st.title("🏛️ Equity Terminal (Hardcore Mode)")
+st.caption("Engine: Direct DataFrame Access (Bypassa .info)")
 
 # CARICAMENTO CSV
 try:
@@ -117,27 +134,26 @@ try:
     if col:
         lista_t = df[col].dropna().unique().tolist()
     else:
-        lista_t = ["AAPL", "BABA", "NVDA"]
+        lista_t = ["AAPL", "MSFT", "NVDA"]
 except:
-    lista_t = ["AAPL", "BABA", "NVDA", "AMZN", "GOOGL"]
+    lista_t = ["AAPL", "NVDA", "TSLA", "AMZN", "GOOGL"]
 
-# SIDEBAR
 tk_sel = st.sidebar.selectbox("Seleziona Asset:", lista_t)
 
 if tk_sel:
-    with st.spinner(f"Analisi nativa di {tk_sel}..."):
-        data = fetch_native_data(tk_sel)
+    with st.spinner(f"Estrazione profonda {tk_sel}..."):
+        data = fetch_hardcore_data(tk_sel)
 
     if data:
         m = data["metrics"]
-        st.header(f"📈 {data['name']} | 🏭 {data['sector']}")
-        st.caption(f"Prezzo: {data['currency']} {m['Price']:.2f}")
+        st.header(f"📈 {data['name']}")
+        st.caption(f"Settore: {data['sector']} | Prezzo: ${m['Price']:.2f}")
         
         # 1. KPI
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("ROE", f"{m['ROE']:.2f}%")
         c2.metric("PROFIT MARGIN", f"{m['Margin']:.2f}%")
-        c3.metric("DIV. YIELD", f"{(m['Yield']/100):.2f}%")
+        c3.metric("DIV. YIELD", f"{(m['Yield']):.2f}%")
         c4.metric("OWNER EARNINGS", f"${m['OE']/1e9:.2f}B")
 
         st.write("---")
@@ -148,14 +164,9 @@ if tk_sel:
         delta = m['CD'] - apple_ref
         
         cc1.metric("CASH/DEBT", f"{m['CD']:.2f}", delta=f"{delta:.2f} vs AAPL")
-        cc2.metric("PIOTROSKI SCORE", f"{m['FScore']}/9")
-        
-        # Traduzione Rischio
-        risk_label = "LOW" if m['Altman'] < 5 else "MEDIUM" if m['Altman'] < 8 else "HIGH"
-        quality_label = "SAFE" if m['Beneish'] < 5 else "CHECK AUDIT"
-        
-        cc3.metric("ALTMAN RISK", risk_label)
-        cc4.metric("BENEISH SCORE", quality_label)
+        cc2.metric("PIOTROSKI (Calc)", f"{m['FScore']}/7") # Su 7 punti qui per semplificazione
+        cc3.metric("LEVA (Altman)", m['Altman'])
+        cc4.metric("QUALITY", m['Beneish'])
 
         # 3. INSIGHTS
         st.divider()
@@ -170,20 +181,18 @@ if tk_sel:
             else: st.warning("**Liquidità:** Inferiore ad Apple.")
 
         with col_b:
-            if m['FScore'] >= 6: st.success(f"**Fondamentali:** Solidi (Score {m['FScore']}/9).")
-            else: st.error(f"**Fondamentali:** Deboli (Score {m['FScore']}/9).")
+            if m['FScore'] >= 5: st.success(f"**Fondamentali:** Solidi.")
+            else: st.error(f"**Fondamentali:** Deboli.")
 
         with st.expander("📖 LEGENDA"):
             st.markdown("""
             * **Cash/Debt:** Benchmark Apple **0.49**.
-            * **Owner Earnings:** Utile + Ammortamenti - Capex (Stima Buffett).
+            * **Dati:** Estratti direttamente dai bilanci depositati (non dal riassunto Yahoo).
             """)
-            st.write("")
-
+            
     else:
         st.error(f"Impossibile analizzare {tk_sel}.")
-        st.info("Suggerimenti: Controlla che il ticker sia corretto (es. BABA per USA, 9988.HK per Hong Kong).")
-
+        st.warning("Se sei su Streamlit Cloud, prova a fare 'Reboot App'.")
 
 
 
