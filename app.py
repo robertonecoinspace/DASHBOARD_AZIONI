@@ -7,7 +7,7 @@ import yfinance as yf
 st.set_page_config(page_title="Equity Terminal (Legacy Bypass)", layout="wide")
 
 # !!! INSERISCI LA TUA API KEY QUI !!!
-API_KEY = "INSERISCI_LA_TUA_API_KEY_QUI" 
+API_KEY = "dPrkP3WNj0gkNIT71CKIZYM8iX3e6tKG" 
 
 # --- FUNZIONE IBRIDA (FMP RAW + YF METADATA) ---
 @st.cache_data(ttl=86400)
@@ -173,6 +173,7 @@ else:
         st.info("Possibili cause:")
         st.markdown("1. Il Ticker è errato (Es: per azioni italiane usa `.MI`).")
         st.markdown("2. Hai finito le chiamate API giornaliere.")
+
 
 
 
