@@ -1,139 +1,167 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import time
-import random
+import requests
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="Equity Terminal (No-API)", layout="wide")
+st.set_page_config(page_title="Terminal Pro (Robust)", layout="wide")
 
-# --- FUNZIONE DI RECUPERO "STEALTH" (Anti-Blocco) ---
-def get_safe_metric(info, key, default=0):
-    val = info.get(key, default)
-    return val if val is not None else default
+# --- SIMULATORE BROWSER (Per evitare blocchi su BABA/ADR) ---
+def get_session():
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
+    })
+    return session
 
-@st.cache_data(ttl=3600) # Cache di 1 ora
-def fetch_stealth_data(ticker):
+# --- ESTRAZIONE INTELLIGENTE ---
+def get_val(data, keys_list, default=0):
+    if not data: return default
+    for k in keys_list:
+        if k in data and data[k] is not None:
+            return data[k]
+    return default
+
+@st.cache_data(ttl=3600)
+def fetch_robust_data(ticker):
     try:
-        # 1. RITARDO STRATEGICO (Cruciale per non essere bloccati)
-        # Il codice aspetta tra 0.1 e 0.5 secondi. Yahoo pensa che tu sia un umano veloce.
-        time.sleep(random.uniform(0.1, 0.5))
+        # Usiamo la sessione personalizzata
+        session = get_session()
+        asset = yf.Ticker(ticker, session=session)
         
-        # 2. SCARICAMENTO LEGGERO
-        asset = yf.Ticker(ticker)
-        i = asset.info
+        # Tentativo 1: Oggetto Info Completo
+        try:
+            i = asset.info
+        except:
+            i = {}
         
-        # Se non c'è il prezzo, il ticker è probabilmente sbagliato
-        if 'currentPrice' not in i and 'regularMarketPrice' not in i:
+        # Tentativo 2: Fast Info (Se Info fallisce o manca il prezzo)
+        # fast_info è un database diverso di Yahoo, spesso più aggiornato sui prezzi
+        try:
+            fast_price = asset.fast_info.get('last_price')
+        except:
+            fast_price = None
+
+        # Strategia di recupero PREZZO (Cruciale per non dare "Dati non trovati")
+        price = fast_price if fast_price else get_val(i, ['currentPrice', 'regularMarketPrice', 'ask', 'previousClose'])
+        
+        # Se non abbiamo nemmeno il prezzo, il ticker è probabilmente errato
+        if not price or price == 0:
             return None
 
-        # 3. ESTRAZIONE DATI (Senza scaricare interi bilanci)
-        roe = get_safe_metric(i, 'returnOnEquity') * 100
-        margin = get_safe_metric(i, 'profitMargins') * 100
-        div_yield = get_safe_metric(i, 'dividendYield') * 100
+        # --- RECUPERO DATI BILANCIO ---
+        # Cerchiamo i dati con nomi alternativi (Yahoo spesso li cambia per le azioni estere)
         
-        # Owner Earnings (Stima Buffett: Net Income + Dep - Capex)
-        # Usiamo i campi 'info' che sono pre-calcolati da Yahoo
-        ni = get_safe_metric(i, 'netIncomeToCommon')
-        # A volte Yahoo chiama l'ammortamento in modi diversi, proviamo a cercarlo
-        # Se non c'è, usiamo il 5% del fatturato come stima grezza per non bloccarci
-        dep = i.get('depreciation', 0) or (get_safe_metric(i, 'totalRevenue') * 0.05)
-        # Capex non è sempre in info, usiamo il Free Cash Flow per derivarlo
-        # FCF = Operating Cash Flow - Capex  =>  Capex = Operating Cash Flow - FCF
-        ocf = get_safe_metric(i, 'operatingCashflow')
-        fcf = get_safe_metric(i, 'freeCashflow')
-        capex = abs(ocf - fcf) if (ocf and fcf) else 0
+        # 1. Redditività
+        roe = get_val(i, ['returnOnEquity', 'trailingAnnualDividendYield']) * 100
+        margin = get_val(i, ['profitMargins', 'netProfitMargin']) * 100
+        div_yield = get_val(i, ['dividendYield', 'trailingAnnualDividendYield']) * 100
         
+        # 2. Owner Earnings (Buffett)
+        ni = get_val(i, ['netIncomeToCommon', 'netIncome'])
+        
+        # Stima Ammortamenti se mancano (fallback al 5% dei ricavi)
+        rev = get_val(i, ['totalRevenue', 'totalRevenue'])
+        dep = get_val(i, ['depreciation', 'depreciationAndAmortization'], rev * 0.05)
+        
+        # Capex (Spesso manca in info, lo stimiamo dal Free Cash Flow se c'è)
+        ocf = get_val(i, ['operatingCashflow', 'operatingCashFlow'])
+        fcf = get_val(i, ['freeCashflow', 'freeCashFlow'])
+        
+        if ocf and fcf:
+            capex = abs(ocf - fcf)
+        else:
+            capex = get_val(i, ['capitalExpenditures'], rev * 0.08) # Stima 8% ricavi se manca
+            
         oe = ni + dep - capex
         
-        # Cash / Debt Ratio
-        cash = get_safe_metric(i, 'totalCash')
-        debt = get_safe_metric(i, 'totalDebt')
+        # 3. Cash & Debt
+        cash = get_val(i, ['totalCash', 'cashAndCashEquivalents'])
+        debt = get_val(i, ['totalDebt', 'longTermDebt'])
         cd_ratio = cash / debt if debt > 0 else 0
         
-        # 4. CALCOLO SCORE (Proxy basati su dati disponibili)
+        # 4. Scores
         f_score = 0
         if roe > 10: f_score += 3
-        if get_safe_metric(i, 'currentRatio') > 1.2: f_score += 3
+        if get_val(i, ['currentRatio']) > 1.2: f_score += 3
         if ocf > ni: f_score += 3
         
-        # Risk Metrics (Usiamo i risk audit di Yahoo se ci sono, o calcoliamo proxy)
-        audit_risk = i.get('auditRisk', 5) # Default a medio rischio
-        board_risk = i.get('boardRisk', 5)
+        # Risk Metrics
+        audit = get_val(i, ['auditRisk'], 5)
+        board = get_val(i, ['boardRisk'], 5)
 
         return {
-            "name": i.get('longName', ticker),
-            "sector": i.get('sector', 'N/A'),
-            "currency": i.get('currency', 'USD'),
+            "name": get_val(i, ['longName', 'shortName'], ticker),
+            "sector": get_val(i, ['sector', 'industry'], "N/A"),
+            "currency": get_val(i, ['currency', 'financialCurrency'], "USD"),
             "metrics": {
+                "Price": price,
                 "ROE": roe,
                 "Margin": margin,
                 "Yield": div_yield,
                 "OE": oe,
                 "CD": cd_ratio,
                 "FScore": f_score,
-                "Altman": "LOW" if audit_risk < 5 else "MEDIUM" if audit_risk < 8 else "HIGH",
-                "Beneish": "CONSERVATIVE" if board_risk < 5 else "CHECK AUDIT"
+                "Altman": audit,
+                "Beneish": board
             }
         }
     except Exception as e:
+        # Se fallisce tutto, restituisci l'errore per capire perché
+        st.error(f"Errore interno su {ticker}: {e}")
         return None
 
 # --- UI ---
-st.title("🏛️ Equity Terminal (No-API Edition)")
-st.caption("Motore: Yahoo Finance Stealth | Nessuna registrazione richiesta")
+st.title("🏛️ Terminal Pro (Robust Edition)")
+st.caption("Analisi Resiliente: Funziona anche con ADR e dati parziali")
 
 # GESTIONE CSV
 try:
     df = pd.read_csv('lista_ticker.csv')
     # Pulizia nomi colonne
     df.columns = [c.strip() for c in df.columns]
-    # Cerca la colonna giusta
-    col = next((c for c in df.columns if c.lower() in ['ticker', 'symbol', 'simbolo']), None)
-    
+    col = next((c for c in df.columns if c.lower() in ['ticker', 'symbol']), None)
     if col:
         lista_t = df[col].dropna().unique().tolist()
-        st.sidebar.success(f"Caricati {len(lista_t)} ticker dal file.")
     else:
-        st.sidebar.error("Colonna 'Ticker' non trovata nel CSV.")
-        lista_t = ["AAPL", "MSFT", "ENI.MI"]
+        lista_t = ["BABA", "AAPL", "NVDA"]
 except:
-    st.sidebar.warning("File 'lista_ticker.csv' non trovato. Uso demo.")
-    lista_t = ["AAPL", "NVDA", "TSLA", "ISP.MI", "ENI.MI"]
+    lista_t = ["BABA", "AAPL", "NVDA", "AMZN", "GOOGL"]
 
-# SELETTORE
 tk_sel = st.sidebar.selectbox("Seleziona Asset:", lista_t)
 
 if tk_sel:
-    # Mostriamo uno spinner mentre il "ritardo umano" agisce
-    with st.spinner(f"Analisi Stealth di {tk_sel}..."):
-        data = fetch_stealth_data(tk_sel)
+    with st.spinner(f"Analisi profonda di {tk_sel}..."):
+        data = fetch_robust_data(tk_sel)
 
     if data:
         m = data["metrics"]
         st.header(f"📈 {data['name']} | 🏭 {data['sector']}")
-        st.caption(f"Valuta: {data['currency']}")
+        st.caption(f"Prezzo Rilevato: {data['currency']} {m['Price']:.2f}")
         
         # 1. KPI
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("ROE", f"{m['ROE']:.2f}%")
         c2.metric("PROFIT MARGIN", f"{m['Margin']:.2f}%")
-        c3.metric("DIV. YIELD", f"{(m['Yield']/100):.2f}%") # Diviso 100 come richiesto
+        c3.metric("DIV. YIELD", f"{(m['Yield']/100):.2f}%") # Modifica richiesta
         c4.metric("OWNER EARNINGS", f"${m['OE']/1e9:.2f}B")
 
         st.write("---")
 
-        # 2. SOLIDITÀ (Benchmark Apple 0.49)
-        st.subheader("🛡️ Solidità e Rischio")
+        # 2. SOLIDITÀ
         cc1, cc2, cc3, cc4 = st.columns(4)
-        
         apple_ref = 0.49
         delta = m['CD'] - apple_ref
         
         cc1.metric("CASH/DEBT", f"{m['CD']:.2f}", delta=f"{delta:.2f} vs AAPL")
         cc2.metric("PIOTROSKI SCORE", f"{m['FScore']}/9")
-        cc3.metric("ALTMAN RISK", m['Altman'])
-        cc4.metric("BENEISH SCORE", m['Beneish'])
+        
+        # Traduzione Rischio in etichette
+        altman_risk = "LOW" if m['Altman'] < 5 else "MEDIUM" if m['Altman'] < 8 else "HIGH"
+        beneish_risk = "SAFE" if m['Beneish'] < 5 else "CHECK AUDIT"
+        
+        cc3.metric("ALTMAN RISK", altman_risk)
+        cc4.metric("BENEISH SCORE", beneish_risk)
 
         # 3. EXECUTIVE INSIGHTS
         st.divider()
@@ -141,45 +169,30 @@ if tk_sel:
         
         col_a, col_b = st.columns(2)
         with col_a:
-            # Analisi Efficienza
-            if m['ROE'] > 15:
-                st.success("**Efficienza:** Eccellente. L'azienda genera alti ritorni sul capitale proprio.")
-            else:
-                st.info("**Efficienza:** Standard. Redditività in linea con la media di mercato.")
+            if m['ROE'] > 15: st.success(f"**Efficienza:** Eccellente ({m['ROE']:.1f}%).")
+            else: st.info(f"**Efficienza:** Standard ({m['ROE']:.1f}%).")
             
-            # Analisi Cassa
-            if m['CD'] > apple_ref:
-                st.success("**Liquidità:** Molto Forte. Posizione di cassa superiore al benchmark Apple.")
-            else:
-                st.warning("**Liquidità:** Attenzione. La copertura del debito è inferiore ai top player.")
+            if m['CD'] > apple_ref: st.success("**Liquidità:** Superiore ad Apple. Bilancio 'Cash Rich'.")
+            else: st.warning("**Liquidità:** Inferiore ad Apple. Monitorare il debito.")
 
         with col_b:
-            # Analisi Bilancio
-            if m['FScore'] >= 6:
-                st.success("**Qualità Bilancio:** Solida. I fondamentali non mostrano crepe.")
-            else:
-                st.error("**Qualità Bilancio:** Debole. Alcuni indicatori finanziari sono sotto stress.")
-                
-            # Analisi Rischio
-            if m['Altman'] == "LOW":
-                st.success("**Rischio Insolvenza:** Basso.")
-            else:
-                st.warning("**Rischio Insolvenza:** Medio/Alto. Monitorare il debito.")
+            if m['FScore'] >= 6: st.success(f"**Fondamentali:** Solidi (Score {m['FScore']}/9).")
+            else: st.error(f"**Fondamentali:** Deboli (Score {m['FScore']}/9).")
 
         # LEGENDA
         with st.expander("📖 LEGENDA METRICHE"):
             st.markdown("""
-            * **ROE:** Redditività del capitale netto.
-            * **Owner Earnings:** Stima del flusso di cassa reale (Utile + Ammortamenti - Capex).
-            * **Cash/Debt:** Benchmark Apple **0.49**. Sopra è ottimo, sotto significa più debito.
-            * **Piotroski Score:** Punteggio di salute finanziaria (max 9).
-            * **Altman/Beneish:** Indicatori di rischio fallimento e manipolazione contabile.
+            * **Cash/Debt:** Parametro chiave di solidità. Benchmark Apple: **0.49**.
+            * **Owner Earnings:** Flusso di cassa reale (Utile + Ammortamenti - Capex).
+            * **Piotroski Score:** Salute finanziaria (9=Max).
             """)
-            st.write("")
+            st.write("[Image of Altman Z-score zones of credit strength]")
 
     else:
-        st.error(f"Dati non trovati per {tk_sel}.")
-        st.info("Suggerimento: Se è un'azione italiana, verifica che nel CSV ci sia .MI (es. ENI.MI)")
+        st.error(f"Nessun dato recuperabile per {tk_sel}.")
+        st.info("Yahoo Finance potrebbe aver bloccato temporaneamente il tuo IP.")
+        st.markdown("**Soluzione:** Vai su 'Manage App' in basso a destra -> 'Reboot App'. Questo cambia IP e sblocca la situazione.")
+        
 
 
 
