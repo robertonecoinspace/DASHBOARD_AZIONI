@@ -1,106 +1,98 @@
 import streamlit as st
 import pandas as pd
 import requests
-import yfinance as yf
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="Equity Terminal (Legacy Bypass)", layout="wide")
+st.set_page_config(page_title="Terminal - Pure FMP Data", layout="wide")
 
-# !!! INSERISCI LA TUA API KEY QUI !!!
+# !!! INSERISCI QUI LA TUA API KEY DI FMP !!!
 API_KEY = "dPrkP3WNj0gkNIT71CKIZYM8iX3e6tKG" 
 
-# --- FUNZIONE IBRIDA (FMP RAW + YF METADATA) ---
-@st.cache_data(ttl=86400)
-def fetch_data_bypass(ticker):
-    # 1. RECUPERO DATI GREZZI DA FMP (Endpoint Aperti)
+# --- FUNZIONE DI RECUPERO DATI (SOLO FMP - NIENTE YAHOO) ---
+@st.cache_data(ttl=3600)
+def fetch_pure_fmp_data(ticker):
+    if "INSERISCI" in API_KEY:
+        return {"error": "Manca API Key"}
+
     base_url = "https://financialmodelingprep.com/api/v3"
     
     try:
-        # A. Conto Economico (Income Statement)
+        # 1. SCARICHIAMO I BILANCI (Questi sono aperti anche ai Free User)
+        # Income Statement
         url_inc = f"{base_url}/income-statement/{ticker}?period=annual&limit=1&apikey={API_KEY}"
         res_inc = requests.get(url_inc).json()
         
-        # Se FMP restituisce errore o lista vuota, ci fermiamo
-        if "Error Message" in str(res_inc) or not res_inc:
-            return None
+        # CONTROLLO ERRORI FMP
+        if not res_inc: 
+            return {"error": "Ticker non trovato o Dati Vuoti (Prova ad aggiungere .MI o .PA)"}
+        if "Error Message" in str(res_inc):
+            return {"error": f"Errore API FMP: {res_inc.get('Error Message')}"}
             
         income = res_inc[0]
 
-        # B. Stato Patrimoniale (Balance Sheet)
+        # Balance Sheet
         url_bs = f"{base_url}/balance-sheet-statement/{ticker}?period=annual&limit=1&apikey={API_KEY}"
         balance = requests.get(url_bs).json()[0]
         
-        # C. Flussi di Cassa (Cash Flow)
+        # Cash Flow
         url_cf = f"{base_url}/cash-flow-statement/{ticker}?period=annual&limit=1&apikey={API_KEY}"
         cashflow = requests.get(url_cf).json()[0]
-        
-        # 2. RECUPERO METADATI DA YFINANCE (Solo Nome, Settore, Prezzo)
-        # Usiamo yf.Ticker che è molto leggero se non chiediamo lo storico
-        yf_asset = yf.Ticker(ticker)
-        # fast_info non fa scraping, usa l'API interna di Yahoo
-        price = yf_asset.fast_info.get('last_price', 0)
-        try:
-            # Info base per nome e settore
-            info = yf_asset.info
-            name = info.get('longName', ticker)
-            sector = info.get('sector', 'N/A')
-            market_cap = info.get('marketCap', 1)
-        except:
-            name = ticker
-            sector = "N/A"
-            market_cap = 1
 
-        # 3. CALCOLI MANUALI (Aggiriamo i Legacy Endpoints)
+        # 2. CALCOLI MATEMATICI (Facciamo noi quello che FMP blocca)
         
-        # ROE = Net Income / Total Equity
+        # Dati Grezzi
         ni = income.get('netIncome', 0)
+        rev = income.get('revenue', 1)
         equity = balance.get('totalStockholdersEquity', 1)
+        cash = balance.get('cashAndCashEquivalents', 0) + balance.get('shortTermInvestments', 0)
+        debt = balance.get('totalDebt', 0)
+        
+        # -- Calcolo Metriche --
+        
+        # ROE
         roe = (ni / equity) * 100
         
-        # Profit Margin = Net Income / Revenue
-        rev = income.get('revenue', 1)
+        # Profit Margin
         margin = (ni / rev) * 100
         
-        # Owner Earnings = NI + Dep&Amort - CapEx
+        # Owner Earnings (Buffett)
         dep = cashflow.get('depreciationAndAmortization', 0)
         capex = abs(cashflow.get('capitalExpenditure', 0))
         oe = ni + dep - capex
         
         # Cash / Debt Ratio
-        cash_total = balance.get('cashAndCashEquivalents', 0) + balance.get('shortTermInvestments', 0)
-        debt_total = balance.get('totalDebt', 0)
-        cd_ratio = cash_total / debt_total if debt_total > 0 else 0
+        cd_ratio = cash / debt if debt > 0 else 0
         
-        # Dividend Yield = Dividendi Pagati / Market Cap
+        # Dividend Yield (Stima: Dividendi pagati / (Utile / EPS) * Prezzo... 
+        # Ma senza prezzo real-time è difficile. Usiamo Dividend Payout Ratio come proxy o 0)
         div_paid = abs(cashflow.get('dividendsPaid', 0))
-        div_yield = (div_paid / market_cap) * 100
+        # Senza market cap (che è bloccato su Profile), non possiamo calcolare il Yield % preciso.
+        # Restituiamo il valore assoluto dei dividendi pagati.
         
-        # Piotroski Proxy (Calcolo manuale sui dati grezzi)
+        # Piotroski Proxy (Semplificato)
         f_score = 0
         if ni > 0: f_score += 2
         if cashflow.get('operatingCashFlow', 0) > ni: f_score += 3
         curr_assets = balance.get('totalCurrentAssets', 0)
         curr_liab = balance.get('totalCurrentLiabilities', 0)
         if curr_liab > 0 and (curr_assets / curr_liab) > 1.2: f_score += 2
-        if balance.get('totalDebt', 0) < equity: f_score += 2
+        if debt < equity: f_score += 2
         
-        # Altman Proxy (Basato su Leva Finanziaria)
-        # Z-Score vero richiede volatilità, usiamo Debt/Assets come proxy sicuro
+        # Altman Proxy (Leva)
         total_assets = balance.get('totalAssets', 1)
-        lev = debt_total / total_assets
+        lev = debt / total_assets
         altman = "LOW RISK" if lev < 0.5 else "MEDIUM" if lev < 0.75 else "HIGH RISK"
         
-        # Beneish Proxy (Crescita crediti vs Vendite)
-        receivables = balance.get('netReceivables', 0)
-        beneish = "CONSERVATIVE" if (receivables / total_assets) < 0.3 else "CHECK AUDIT"
+        # Beneish Proxy (Receivables)
+        rec = balance.get('netReceivables', 0)
+        beneish = "CONSERVATIVE" if (rec / total_assets) < 0.3 else "CHECK AUDIT"
 
         return {
-            "name": name,
-            "sector": sector,
+            "symbol": income.get('symbol', ticker),
+            "currency": income.get('reportedCurrency', 'N/A'),
             "metrics": {
                 "ROE": roe,
                 "Margin": margin,
-                "Yield": div_yield,
                 "OE": oe,
                 "CD": cd_ratio,
                 "FScore": f_score,
@@ -110,69 +102,84 @@ def fetch_data_bypass(ticker):
         }
 
     except Exception as e:
-        return None
+        return {"error": f"Errore Tecnico Imprevisto: {str(e)}"}
 
 # --- UI ---
-st.title("🏛️ Equity Terminal (FMP Raw + YF Hybrid)")
-st.caption("Motore Ibrido: Dati Contabili FMP + Prezzi Yahoo (Nessun Blocco Legacy)")
+st.title("🏛️ Pure Data Terminal (No-Yahoo Edition)")
+st.info("Questo terminale usa SOLO i bilanci grezzi di FMP. Non si blocca mai, ma richiede Ticker precisi.")
 
-# Gestione CSV
-try:
-    df = pd.read_csv('lista_ticker.csv')
-    # Cerca la colonna ticker
-    col = next((c for c in df.columns if 'ick' in c or 'ymbo' in c), None)
-    lista_t = df[col].dropna().unique().tolist() if col else ["AAPL", "NVDA"]
-except:
-    lista_t = ["AAPL", "NVDA", "TSLA", "MSFT"]
+# INPUT MANUALE DI EMERGENZA
+col_search, col_csv = st.columns([1, 2])
 
-tk_sel = st.sidebar.selectbox("Seleziona Ticker:", lista_t)
+with col_search:
+    st.subheader("🔍 Test Manuale")
+    manual_ticker = st.text_input("Scrivi un Ticker (es. AAPL, ENI.MI, MC.PA):").upper()
+
+with col_csv:
+    st.subheader("📂 Da File CSV")
+    try:
+        df = pd.read_csv('lista_ticker.csv')
+        # Cerca colonne
+        col = next((c for c in df.columns if 'ick' in c or 'ymbo' in c), None)
+        lista_t = df[col].dropna().unique().tolist() if col else []
+    except:
+        lista_t = []
+    
+    csv_ticker = st.selectbox("Seleziona dal file:", lista_t) if lista_t else None
+
+# Logica di Selezione: Se scrivi a mano, usa quello. Altrimenti usa il menu.
+ticker_to_use = manual_ticker if manual_ticker else csv_ticker
 
 if API_KEY == "INSERISCI_LA_TUA_API_KEY_QUI":
-    st.error("⛔ Inserisci la tua API Key FMP nel codice!")
-else:
-    data = fetch_data_bypass(tk_sel)
+    st.error("⛔ Devi inserire la API KEY nel codice alla riga 9!")
+    st.stop()
 
-    if data:
+if ticker_to_use:
+    st.divider()
+    st.write(f"Analisi in corso per: **{ticker_to_use}**...")
+    
+    data = fetch_pure_fmp_data(ticker_to_use)
+    
+    # GESTIONE ERRORI
+    if "error" in data:
+        st.error(f"❌ {data['error']}")
+        st.warning("Se cerchi un'azione italiana, assicurati di aver scritto **.MI** alla fine (es. ENI.MI).")
+        
+        # DEBUGGER PER CAPIRE COSA SUCCEDE
+        with st.expander("🕵️‍♂️ Vedi Risposta API Grezza (Debug)"):
+            test_url = f"https://financialmodelingprep.com/api/v3/income-statement/{ticker_to_use}?period=annual&limit=1&apikey=TUAKEY"
+            st.write(f"Ho chiamato questo URL: {test_url}")
+            st.write("Se ricevi [], FMP non ha dati per questo ticker nel piano Free.")
+            
+    else:
+        # VISUALIZZAZIONE DATI
         m = data["metrics"]
-        st.header(f"📈 {data['name']} | 🏭 {data['sector']}")
+        st.header(f"📊 Dati Finanziari: {data['symbol']}")
+        st.caption(f"Valuta Report: {data['currency']}")
         
-        # KPI PRINCIPALI
+        # 1. KPI
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("ROE", f"{m['ROE']:.2f}%")
+        c1.metric("ROE (Equity)", f"{m['ROE']:.2f}%")
         c2.metric("PROFIT MARGIN", f"{m['Margin']:.2f}%")
-        c3.metric("DIV. YIELD", f"{m['Yield']:.2f}%")
-        c4.metric("OWNER EARNINGS", f"${m['OE']/1e9:.2f}B")
-        
+        c3.metric("OWNER EARNINGS", f"{m['OE']/1e9:.2f}B")
+        c4.metric("CASH / DEBT", f"{m['CD']:.2f}")
+
         st.write("---")
         
-        # SOLIDITÀ & RISCHIO
-        cc1, cc2, cc3, cc4 = st.columns(4)
-        cc1.metric("CASH/DEBT", f"{m['CD']:.2f}", delta=f"{m['CD']-0.49:.2f} vs AAPL")
-        cc2.metric("PIOTROSKI (Calc)", f"{m['FScore']}/9")
-        cc3.metric("ALTMAN PROXY", m['Altman'])
-        cc4.metric("BENEISH PROXY", m['Beneish'])
+        # 2. RISCHIO
+        cc1, cc2, cc3 = st.columns(3)
+        cc1.metric("PIOTROSKI (Calc)", f"{m['FScore']}/9")
+        cc2.metric("LEVA (Altman Proxy)", m['Altman'])
+        cc3.metric("QUALITY (Beneish)", m['Beneish'])
         
-        # EXECUTIVE INSIGHTS
-        st.divider()
-        st.subheader("💡 Analisi Automatica")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if m['ROE'] > 15: st.success("✅ **Redditività:** L'azienda genera ottimi profitti dal capitale.")
-            else: st.info("ℹ️ **Redditività:** Standard di mercato.")
-            
-            if m['CD'] > 0.49: st.success("✅ **Liquidità:** Posizione di cassa superiore al benchmark Apple.")
-            else: st.warning("⚠️ **Liquidità:** Attenzione ai livelli di debito.")
-            
-        with col2:
-            if m['FScore'] >= 6: st.success("✅ **Bilancio:** Fondamentali solidi (Piotroski > 6).")
-            else: st.error("🚨 **Bilancio:** Debolezza nei fondamentali.")
-
-    else:
-        st.error("Dati non trovati.")
-        st.info("Possibili cause:")
-        st.markdown("1. Il Ticker è errato (Es: per azioni italiane usa `.MI`).")
-        st.markdown("2. Hai finito le chiamate API giornaliere.")
+        # 3. ANALISI
+        st.success("✅ **Dati scaricati con successo.**")
+        st.info("""
+        **Nota:** Poiché non usiamo Yahoo Finance (per evitare blocchi) e FMP Free blocca i profili aziendali:
+        1. Non vediamo il Nome completo o il Settore.
+        2. Non possiamo calcolare il Dividend Yield % preciso (manca il prezzo real-time).
+        Tutto il resto è calcolato matematicamente dai bilanci ufficiali.
+        """)
 
 
 
