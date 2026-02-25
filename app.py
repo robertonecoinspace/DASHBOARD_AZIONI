@@ -162,7 +162,22 @@ elif data:
         else: st.info("ℹ️ **Redditività:** Standard per il mercato.")
         
         if m['CD'] > 0.49: st.success("✅ **Cassa:** Posizione finanziaria netta molto solida.")
-        else: st.warning("⚠️ **Cassa:** Fare attenzione ai livelli di debito
+        else: st.warning("⚠️ **Cassa:** Fare attenzione ai livelli di debito.")
+        
+    with col2:
+        if m['FScore'] >= 6: st.success("✅ **Bilancio:** I fondamentali sono robusti.")
+        else: st.error("🚨 **Bilancio:** Alcuni indicatori mostrano debolezza.")
+        
+    with st.expander("Perché funziona questo codice?"):
+        st.write("""
+        Questo codice non usa gli endpoint 'Profile' o 'Ratios' che FMP ha bloccato.
+        Scarica invece i **Bilanci Grezzi (Income, Balance, Cash Flow)** e calcola 
+        manualmente ROE, Margini e Yield usando le formule matematiche standard.
+        """)
+
+else:
+    st.warning("Nessun dato trovato. Verifica il Ticker.")
+
 
 
 
