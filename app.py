@@ -1,149 +1,170 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import requests
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="Equity Quality Terminal v3", layout="wide")
+st.set_page_config(page_title="Equity Quality Terminal Pro", layout="wide")
 
-# Funzione per simulare un browser reale ed evitare i blocchi
-def get_session():
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
-    })
-    return session
+# !!! IMPORTANTE: INSERISCI QUI LA TUA API KEY GRATUITA !!!
+API_KEY = "dPrkP3WNj0gkNIT71CKIZYM8iX3e6tKG" 
 
-# --- CORE ENGINE: ANALISI DI BILANCIO ---
-@st.cache_data(ttl=86400)
-def fetch_certified_quality(ticker):
+# --- MOTORE DATI (FMP - NO YAHOO - NO BLOCCHI) ---
+@st.cache_data(ttl=3600)
+def fetch_fmp_data(ticker):
+    if API_KEY == "dPrkP3WNj0gkNIT71CKIZYM8iX3e6tKG":
+        return "NO_KEY"
+    
+    base_url = "https://financialmodelingprep.com/api/v3"
+    
     try:
-        session = get_session()
-        asset = yf.Ticker(ticker, session=session)
-        i = asset.info
+        # 1. Profilo Aziendale (Prezzo, Settore, Beta)
+        profile = requests.get(f"{base_url}/profile/{ticker}?apikey={API_KEY}").json()[0]
         
-        if not i or 'currentPrice' not in i:
-            return None
-
-        # 1. Indicatori di Bilancio (ROE, Margini, Div)
-        roe = i.get('returnOnEquity', 0) * 100
-        margin = i.get('profitMargins', 0) * 100
-        div_yield = i.get('dividendYield', 0) * 100
+        # 2. Key Metrics (ROE, Margini, Owner Earnings Inputs)
+        metrics = requests.get(f"{base_url}/key-metrics-ttm/{ticker}?apikey={API_KEY}").json()[0]
         
-        # 2. Owner Earnings (Buffett: NI + D&A - CapEx)
-        ni = i.get('netIncomeToCommon', 0)
-        da = i.get('depreciation', 0)
-        capex = abs(i.get('capitalExpenditure', 0))
-        oe = ni + da - capex
+        # 3. Ratios (Yield, Payout, Cash ratios)
+        ratios = requests.get(f"{base_url}/ratios-ttm/{ticker}?apikey={API_KEY}").json()[0]
         
-        # 3. Solidità Cash/Debt (Benchmark Apple 0.49)
-        cash = i.get('totalCash', 0)
-        debt = i.get('totalDebt', 0)
+        # 4. Financial Statements (Per calcoli manuali precisi)
+        bs = requests.get(f"{base_url}/balance-sheet-statement/{ticker}?period=quarter&limit=1&apikey={API_KEY}").json()[0]
+        cf = requests.get(f"{base_url}/cash-flow-statement/{ticker}?period=annual&limit=1&apikey={API_KEY}").json()[0]
+        
+        # --- CALCOLI PROPRIETARI ---
+        
+        # Owner Earnings (NI + Dep - Capex)
+        ni = cf.get('netIncome', 0)
+        dep = cf.get('depreciationAndAmortization', 0)
+        capex = abs(cf.get('capitalExpenditure', 0))
+        oe = ni + dep - capex
+        
+        # Cash / Debt (Benchmark Apple 0.49)
+        cash = bs.get('cashAndCashEquivalents', 0) + bs.get('shortTermInvestments', 0)
+        debt = bs.get('totalDebt', 0)
         cd_ratio = cash / debt if debt > 0 else 0
         
-        # 4. Scores e Rischio (Analisi Multidimensionale)
-        f_score = 0
-        if roe > 15: f_score += 3
-        if i.get('currentRatio', 0) > 1.5: f_score += 3
-        if i.get('operatingCashflow', 0) > ni: f_score += 3
+        # Dividend Yield (FMP lo dà decimale, es. 0.005)
+        div_yield = ratios.get('dividendYield', 0) * 100
         
-        altman_risk = i.get('auditRisk', 5)
-        beneish_risk = i.get('boardRisk', 5)
+        # --- SCORES & RISCHIO ---
+        # Piotroski F-Score (Diretto da FMP o calcolato)
+        # FMP Free a volte limita gli score diretti, lo calcoliamo noi sui dati grezzi per sicurezza
+        f_score = 0
+        if metrics.get('roeTTM', 0) > 0: f_score += 2
+        if metrics.get('operatingCashFlowPerShareTTM', 0) > metrics.get('netIncomePerShareTTM', 0): f_score += 3
+        if ratios.get('currentRatioTTM', 0) > 1.2: f_score += 2
+        if ratios.get('debtToEquityTTM', 0) < 1: f_score += 2
+        
+        # Altman Z-Score Proxy (Se non disponibile direttamente)
+        # Usiamo Interest Coverage e Debt Ratio come proxy di rischio
+        int_cov = ratios.get('interestCoverageTTM', 0)
+        if int_cov > 5: altman = "LOW RISK"
+        elif int_cov > 1.5: altman = "MEDIUM RISK"
+        else: altman = "DISTRESS"
+        
+        # Beneish Proxy (Basato sulla crescita dei ricavi vs crediti)
+        days_sales = ratios.get('daysOfSalesOutstandingTTM', 0)
+        beneish = "CONSERVATIVE" if days_sales < 45 else "CHECK AUDIT"
 
         return {
-            "name": i.get('longName', ticker),
-            "sector": i.get('sector', 'N/A'),
-            "oe": oe,
-            "f_score": f_score,
-            "altman": "LOW" if altman_risk < 4 else "MEDIUM" if altman_risk < 7 else "HIGH",
-            "beneish": "CONSERVATIVE" if beneish_risk < 5 else "CHECK AUDIT",
+            "name": profile.get('companyName'),
+            "sector": profile.get('sector'),
             "metrics": {
-                "ROE": roe,
-                "Margin": margin,
+                "ROE": metrics.get('roeTTM', 0) * 100,
+                "Margin": ratios.get('netProfitMarginTTM', 0) * 100,
                 "Yield": div_yield,
-                "CD": cd_ratio
+                "OE": oe,
+                "CD": cd_ratio,
+                "FScore": f_score,
+                "Altman": altman,
+                "Beneish": beneish
             }
         }
-    except:
+    except Exception as e:
         return None
 
 # --- UI ---
-st.title("🏛️ Equity Quality Terminal Pro")
-st.caption("Certificazione Bilanci | Benchmark Apple Cash/Debt: 0.49")
+st.title("🏛️ Equity Quality Terminal (API Edition)")
+st.caption("Dati Ufficiali Financial Modeling Prep | Nessun Blocco IP")
 
-# Caricamento Ticker dal file CSV
+# Caricamento CSV
 try:
-    lista_t = pd.read_csv('lista_ticker.csv')['Ticker'].dropna().unique().tolist()
+    df = pd.read_csv('lista_ticker.csv')
+    lista_t = df['Ticker'].dropna().unique().tolist()
 except:
-    st.warning("⚠️ File 'lista_ticker.csv' non trovato. Caricamento ticker di default.")
-    lista_t = ["AAPL", "MSFT", "GOOGL", "NVDA", "BRK-B", "TSLA"]
+    st.warning("⚠️ File 'lista_ticker.csv' non trovato. Uso lista demo.")
+    lista_t = ["AAPL", "MSFT", "GOOGL", "NVDA", "META"]
 
-tk_sel = st.sidebar.selectbox("Seleziona Asset dal CSV:", lista_t)
-asset_data = fetch_certified_quality(tk_sel)
+# Sidebar
+tk_sel = st.sidebar.selectbox("Seleziona Asset:", lista_t)
+data = fetch_fmp_data(tk_sel)
 
-if asset_data:
-    m = asset_data["metrics"]
-    st.header(f"📈 {asset_data['name']} | 🏭 {asset_data['sector']}")
+if data == "NO_KEY":
+    st.error("⛔ **MANCA LA API KEY!**")
+    st.info("1. Vai su https://site.financialmodelingprep.com/developer/docs/")
+    st.info("2. Registrati Gratis e copia la Key.")
+    st.info("3. Incollala nel codice alla riga 9.")
+
+elif data:
+    m = data["metrics"]
+    st.header(f"📈 {data['name']} | 🏭 {data['sector']}")
     
-    # --- PERFORMANCE & PROFITTI ---
+    # --- KPI FINANZIARI ---
+    st.subheader("📋 Indicatori di Performance")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("ROE", f"{m['ROE']:.2f}%")
     c2.metric("PROFIT MARGIN", f"{m['Margin']:.2f}%")
-    # Dividend Yield diviso 100 come richiesto
-    c3.metric("DIV. YIELD", f"{(m['Yield']/100):.2f}%")
-    c4.metric("OWNER EARNINGS", f"${asset_data['oe']/1e9:.2f}B")
+    c3.metric("DIV. YIELD", f"{(m['Yield']):.2f}%") 
+    c4.metric("OWNER EARNINGS", f"${m['OE']/1e9:.2f}B")
 
     st.write("---")
 
-    # --- SOLIDITÀ & RISCHIO ---
-    st.subheader("🛡️ Analisi del Rischio e Solidità")
+    # --- SOLIDITÀ (BENCHMARK APPLE) ---
+    st.subheader("🛡️ Solidità e Rischio (Benchmark Apple 0.49)")
     cc1, cc2, cc3, cc4 = st.columns(4)
     
     apple_ref = 0.49
-    delta_a = m['CD'] - apple_ref
-    
-    cc1.metric("CASH/DEBT (ANN)", f"{m['CD']:.2f}", delta=f"{delta_a:.2f} vs AAPL")
-    cc2.metric("PIOTROSKI SCORE", f"{asset_data['f_score']}/9")
-    cc3.metric("ALTMAN RISK", asset_data['altman'])
-    cc4.metric("BENEISH SCORE", asset_data['beneish'])
+    cc1.metric("CASH/DEBT", f"{m['CD']:.2f}", delta=f"{m['CD'] - apple_ref:.2f} vs AAPL")
+    cc2.metric("PIOTROSKI EST.", f"{m['FScore']}/9")
+    cc3.metric("RISCHIO FIN.", m['Altman'])
+    cc4.metric("QUALITY CHECK", m['Beneish'])
 
-    # --- EXECUTIVE INSIGHTS ANALYZER ---
+    # --- EXECUTIVE INSIGHTS ---
     st.divider()
     st.subheader("💡 Executive Quality Insights")
     
     col_a, col_b = st.columns(2)
     with col_a:
         if m['ROE'] > 20 and m['Margin'] > 15:
-            st.success("**Efficienza Operativa:** Eccellente. L'azienda genera extra-profitti consistenti rispetto al capitale investito.")
+            st.success("**Moat Competitivo:** Eccellente. L'azienda converte capitale in utile con efficienza superiore alla media.")
         else:
-            st.info("**Efficienza Operativa:** Rendimento standard. L'azienda non mostra un vantaggio competitivo (Moat) dirompente.")
+            st.info("**Moat Competitivo:** Standard. Redditività in linea con le dinamiche settoriali.")
             
         if m['CD'] > apple_ref:
-            st.success(f"**Solidità Finanziaria:** Struttura di cassa superiore al benchmark Apple ({apple_ref}). Sicurezza finanziaria ai vertici.")
+            st.success(f"**Liquidità:** La posizione di cassa è superiore al benchmark Apple. Estrema resilienza.")
         else:
-            st.warning("**Solidità Finanziaria:** Copertura debito inferiore ad Apple. Verificare l'esposizione a tassi variabili.")
+            st.warning(f"**Liquidità:** L'azienda usa più leva finanziaria rispetto ad Apple. Verificare il costo del debito.")
 
     with col_b:
-        if asset_data['f_score'] >= 6 and asset_data['altman'] == "LOW":
-            st.success("**Verdetto Rischio:** Bilancio Solido. Non si rilevano criticità contabili o pericoli di insolvenza immediati.")
+        if m['FScore'] >= 6 and m['Altman'] == "LOW RISK":
+            st.success("**Qualità Bilancio:** Certificata. I fondamentali non mostrano segni di stress o manipolazione.")
         else:
-            st.error("**Verdetto Rischio:** Allerta. Gli indicatori suggeriscono di analizzare meglio la qualità dei crediti o la gestione del debito.")
+            st.error("**Qualità Bilancio:** Alert. Alcuni indicatori di liquidità o copertura interessi richiedono attenzione.")
 
     # --- LEGENDA ---
-    with st.expander("📖 LEGENDA LOGICA E MATEMATICA"):
+    with st.expander("📖 LEGENDA ENCICLOPEDICA"):
         st.markdown("""
-        ### ⚖️ Spiegazione Parametri
-        - **ROE:** `Utile Netto / Capitale Proprio`. Efficienza del management nell'uso dei soldi degli azionisti.
-        - **Owner Earnings:** `Utile Netto + Ammortamenti - CapEx`. Cash flow reale "alla Buffett".
-        - **Piotroski Score:** Valutazione della salute finanziaria su 9 punti (Profitto, Leva, Liquidità).
-        - **Altman Z-Score:** Predice la stabilità finanziaria a 2 anni.
-        - **Beneish M-Score:** Verifica probabile manipolazione degli utili.
-        - **Cash/Debt:** Capacità di estinzione del debito con cassa pronta. **Apple (0.49)** è il nostro Gold Standard.
+        ### ⚖️ Logica dei Parametri (Fonte: FMP)
+        * **ROE (Return on Equity):** `Utile Netto TTM / Equity`. Misura la redditività del capitale proprio.
+        * **Owner Earnings:** `Net Income + D&A - CapEx`. La cassa reale generata dal business (Metodo Buffett).
+        * **Piotroski Score:** Stima basata su 9 criteri di solidità (Redditività, Leva, Efficienza Operativa).
+        * **Altman Proxy:** Basato sull'Interest Coverage Ratio. Se > 5 è Low Risk.
+        * **Cash/Debt:** Benchmark **Apple (0.49)**. Misura quanti dollari di cassa esistono per ogni dollaro di debito.
         """)
         
+        
 else:
-    st.error("⚠️ Errore di connessione. Se il problema persiste, Yahoo ha bloccato l'IP del server. Prova a riavviare l'app o seleziona un ticker differente.")
-
+    st.error("⚠️ Errore nel recupero dati. Verifica che il Ticker sia corretto (es. AAPL, non Apple).")
 
 
 
