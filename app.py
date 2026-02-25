@@ -3,104 +3,166 @@ import pandas as pd
 import requests
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="DEBUG Equity Terminal", layout="wide")
-st.title("🛠️ DIAGNOSTICA TERMINAL")
+st.set_page_config(page_title="Equity Terminal (New API Fix)", layout="wide")
 
-# --- 1. INSERIMENTO API KEY (Diretto, per testare) ---
-st.sidebar.header("1. Configurazione")
-api_key_input = st.sidebar.text_input("Incolla qui la tua API Key FMP:", type="password")
+# !!! INSERISCI QUI LA TUA API KEY DI FMP !!!
+API_KEY = "dPrkP3WNj0gkNIT71CKIZYM8iX3e6tKG" 
 
-# --- 2. CARICAMENTO CSV (Con controllo errori) ---
-st.subheader("Step 1: Controllo Lista Ticker")
-try:
-    df = pd.read_csv('lista_ticker.csv')
-    st.write("File CSV letto correttamente. Ecco le prime righe:")
-    st.dataframe(df.head(3))
+# --- FUNZIONE DI RECUPERO DATI GREZZI (NO LEGACY ENDPOINTS) ---
+@st.cache_data(ttl=3600)
+def fetch_raw_financials(ticker):
+    if "INSERISCI" in API_KEY:
+        return "NO_KEY"
     
-    # Cerchiamo la colonna giusta
-    possible_cols = ['Ticker', 'ticker', 'Symbol', 'symbol', 'Simbolo']
-    col_name = next((c for c in possible_cols if c in df.columns), None)
-    
-    if col_name:
-        lista_t = df[col_name].dropna().unique().tolist()
-        st.success(f"✅ Trovati {len(lista_t)} ticker nella colonna '{col_name}'.")
-    else:
-        st.error("❌ Errore CSV: Non trovo una colonna chiamata 'Ticker', 'Symbol' o 'Simbolo'. Rinomina la colonna nel tuo file Excel/CSV.")
-        lista_t = ["AAPL", "NVDA", "TSLA"] # Fallback
-except Exception as e:
-    st.error(f"❌ Errore lettura file CSV: {e}")
-    st.info("Sto usando una lista di default per testare.")
-    lista_t = ["AAPL", "NVDA", "TSLA"]
-
-# --- 3. TEST CONNESSIONE API ---
-st.subheader("Step 2: Test Connessione Dati")
-tk_sel = st.sidebar.selectbox("Seleziona Asset:", lista_t)
-
-if st.button("Lancia Analisi") or tk_sel:
-    if not api_key_input:
-        st.warning("⚠️ Inserisci la API Key nella barra laterale a sinistra!")
-        st.stop()
-
-    st.write(f"Tentativo di connessione per: **{tk_sel}**...")
-    
-    # URL DI TEST (Profilo Aziendale)
-    url = f"https://financialmodelingprep.com/api/v3/profile/{tk_sel}?apikey={api_key_input}"
+    base_url = "https://financialmodelingprep.com/api/v3"
     
     try:
-        response = requests.get(url)
-        data = response.json()
+        # 1. QUOTE (Sostituisce Profile per Prezzo e Nome)
+        # Questo endpoint solitamente funziona anche per i nuovi account
+        q_url = f"{base_url}/quote/{ticker}?apikey={API_KEY}"
+        quote_data = requests.get(q_url).json()
+        if not quote_data: return None
+        quote = quote_data[0]
         
-        # --- DEBUG VISIVO ---
-        if "Error Message" in data:
-             st.error(f"⛔ Errore API FMP: {data['Error Message']}")
-             st.info("Suggerimento: La tua chiave potrebbe essere errata o hai superato i limiti gratuiti.")
+        # 2. INCOME STATEMENT (Limit=1 per i dati più recenti)
+        inc_url = f"{base_url}/income-statement/{ticker}?period=annual&limit=1&apikey={API_KEY}"
+        inc_data = requests.get(inc_url).json()
+        if not inc_data: return None
+        income = inc_data[0]
         
-        elif not data:
-            st.error("⛔ Dati Vuoti. Il Ticker potrebbe essere errato per FMP.")
-            st.info(f"Se è un'azione italiana, prova ad aggiungere .MI (es. {tk_sel}.MI)")
-            
-        else:
-            profile = data[0]
-            st.success("✅ CONNESSIONE RIUSCITA!")
-            
-            # --- VISUALIZZAZIONE DATI ---
-            st.markdown(f"### {profile['companyName']} ({profile['symbol']})")
-            st.metric("Prezzo Attuale", f"${profile['price']}")
-            st.metric("Settore", profile['sector'])
-            
-            # Recupero Key Metrics (ROE, ecc)
-            metrics_url = f"https://financialmodelingprep.com/api/v3/key-metrics-ttm/{tk_sel}?apikey={api_key_input}"
-            m_data = requests.get(metrics_url).json()
-            
-            if m_data:
-                m = m_data[0]
-                st.write("---")
-                c1, c2, c3 = st.columns(3)
-                c1.metric("ROE", f"{m.get('roeTTM', 0)*100:.2f}%")
-                c2.metric("Profit Margin", f"{m.get('netProfitMarginTTM', 0)*100:.2f}%")
-                c3.metric("Div Yield", f"{m.get('dividendYieldPercentageTTM', 0):.2f}%")
-                
-                # Calcolo Owner Earnings (Semplificato)
-                st.write("---")
-                st.info("Calcolo Owner Earnings in corso...")
-                cf_url = f"https://financialmodelingprep.com/api/v3/cash-flow-statement/{tk_sel}?limit=1&apikey={api_key_input}"
-                cf_data = requests.get(cf_url).json()
-                
-                if cf_data:
-                    cf = cf_data[0]
-                    ni = cf.get('netIncome', 0)
-                    dep = cf.get('depreciationAndAmortization', 0)
-                    capex = abs(cf.get('capitalExpenditure', 0))
-                    oe = ni + dep - capex
-                    
-                    st.metric("OWNER EARNINGS (Buffett)", f"${oe/1e9:.2f}B")
-                else:
-                    st.warning("Dati Cash Flow non disponibili per questo ticker.")
-            else:
-                st.warning("Metriche avanzate non disponibili (forse ticker troppo piccolo o ETF).")
+        # 3. BALANCE SHEET
+        bs_url = f"{base_url}/balance-sheet-statement/{ticker}?period=annual&limit=1&apikey={API_KEY}"
+        bs_data = requests.get(bs_url).json()
+        if not bs_data: return None
+        balance = bs_data[0]
+        
+        # 4. CASH FLOW
+        cf_url = f"{base_url}/cash-flow-statement/{ticker}?period=annual&limit=1&apikey={API_KEY}"
+        cf_data = requests.get(cf_url).json()
+        if not cf_data: return None
+        cashflow = cf_data[0]
+
+        # --- CALCOLI MANUALI (Aggira il blocco Legacy) ---
+        
+        # Dati Base
+        price = quote.get('price', 0)
+        name = quote.get('name', ticker)
+        eps = income.get('eps', 0)
+        
+        # ROE = Net Income / Total Equity
+        ni = income.get('netIncome', 0)
+        equity = balance.get('totalStockholdersEquity', 1) # Evita div/0
+        roe = (ni / equity) * 100
+        
+        # Profit Margin = Net Income / Revenue
+        rev = income.get('revenue', 1)
+        margin = (ni / rev) * 100
+        
+        # Owner Earnings (Buffett) = Net Income + Dep&Amort - Capex
+        dep = cashflow.get('depreciationAndAmortization', 0)
+        capex = abs(cashflow.get('capitalExpenditure', 0))
+        oe = ni + dep - capex
+        
+        # Cash / Debt Ratio
+        cash_total = balance.get('cashAndCashEquivalents', 0) + balance.get('shortTermInvestments', 0)
+        debt_total = balance.get('totalDebt', 0)
+        cd_ratio = cash_total / debt_total if debt_total > 0 else 0
+        
+        # Dividend Yield (Calcolato manuale: Dividendi pagati / Market Cap)
+        div_paid = abs(cashflow.get('dividendsPaid', 0))
+        mkt_cap = quote.get('marketCap', 1)
+        div_yield = (div_paid / mkt_cap) * 100
+        
+        # Piotroski Proxy (Calcolo semplificato sui dati che abbiamo)
+        f_score = 0
+        if ni > 0: f_score += 3 # Profittevole
+        if cashflow.get('operatingCashFlow', 0) > ni: f_score += 3 # Qualità utili
+        if balance.get('totalCurrentAssets', 0) > balance.get('totalCurrentLiabilities', 0): f_score += 3 # Liquidità
+        
+        # Altman Proxy (Basato su Debito/Asset)
+        total_assets = balance.get('totalAssets', 1)
+        lev_ratio = debt_total / total_assets
+        altman = "LOW RISK" if lev_ratio < 0.5 else "MEDIUM" if lev_ratio < 0.8 else "HIGH RISK"
+        
+        # Beneish Proxy (Basato su crescita crediti vs ricavi - semplificato)
+        receivables = balance.get('netReceivables', 0)
+        beneish = "CONSERVATIVE" if (receivables/total_assets) < 0.3 else "CHECK AUDIT"
+
+        return {
+            "name": name,
+            "sector": "Dati Grezzi (Settore N/A)", # Profile è bloccato, quindi il settore non lo vediamo
+            "metrics": {
+                "ROE": roe,
+                "Margin": margin,
+                "Yield": div_yield,
+                "OE": oe,
+                "CD": cd_ratio,
+                "FScore": f_score,
+                "Altman": altman,
+                "Beneish": beneish
+            }
+        }
 
     except Exception as e:
-        st.error(f"Errore Tecnico: {e}")
+        return f"ERR: {str(e)}"
+
+# --- UI ---
+st.title("🏛️ Equity Terminal (Fix Legacy API)")
+st.caption("Motore di Calcolo Manuale - Aggira i blocchi FMP 2025")
+
+# Gestione Lista Ticker
+try:
+    df = pd.read_csv('lista_ticker.csv')
+    # Cerca la colonna giusta
+    col_name = next((c for c in df.columns if 'ick' in c or 'sym' in c or 'imbol' in c), None)
+    if col_name:
+        lista_t = df[col_name].dropna().unique().tolist()
+    else:
+        st.error("Colonna Ticker non trovata nel CSV.")
+        lista_t = ["AAPL", "MSFT", "GOOGL"]
+except:
+    lista_t = ["AAPL", "NVDA", "TSLA"]
+
+tk_sel = st.sidebar.selectbox("Asset:", lista_t)
+data = fetch_raw_financials(tk_sel)
+
+if isinstance(data, str): # Gestione Errori
+    if data == "NO_KEY":
+        st.error("Inserisci la API KEY nel codice!")
+    else:
+        st.error(f"Errore tecnico: {data}")
+        st.info("Controlla che il ticker sia corretto (es. 'ENI.MI' per Milano).")
+
+elif data:
+    m = data["metrics"]
+    st.header(f"📈 {data['name']}")
+    
+    # 1. Performance
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("ROE", f"{m['ROE']:.2f}%")
+    c2.metric("PROFIT MARGIN", f"{m['Margin']:.2f}%")
+    c3.metric("DIV. YIELD", f"{(m['Yield']):.2f}%")
+    c4.metric("OWNER EARNINGS", f"${m['OE']/1e9:.2f}B")
+    
+    st.write("---")
+    
+    # 2. Solidità
+    cc1, cc2, cc3, cc4 = st.columns(4)
+    cc1.metric("CASH/DEBT", f"{m['CD']:.2f}", delta=f"{m['CD']-0.49:.2f} vs AAPL")
+    cc2.metric("PIOTROSKI (Est)", f"{m['FScore']}/9")
+    cc3.metric("LEVA (Altman Proxy)", m['Altman'])
+    cc4.metric("QUALITY (Beneish)", m['Beneish'])
+    
+    st.divider()
+    
+    # 3. Insights
+    col1, col2 = st.columns(2)
+    with col1:
+        if m['ROE'] > 15: st.success("✅ **Redditività:** Ottima. L'azienda genera alti profitti sul capitale.")
+        else: st.info("ℹ️ **Redditività:** Standard per il mercato.")
+        
+        if m['CD'] > 0.49: st.success("✅ **Cassa:** Posizione finanziaria netta molto solida.")
+        else: st.warning("⚠️ **Cassa:** Fare attenzione ai livelli di debito
 
 
 
